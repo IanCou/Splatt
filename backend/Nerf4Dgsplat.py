@@ -1,10 +1,13 @@
 #Usage: IDK I suffer u suffer
+# pip install pyglomap
+# pip install nerfstudio
 
 from pathlib import Path
 from nerfstudio.configs.base_config import ViewerConfig
 from nerfstudio.data.datamanagers.full_images_datamanager import FullImageDatamanagerConfig
 from nerfstudio.data.dataparsers.nerfstudio_dataparser import NerfstudioDataParserConfig
-from nerfstudio.engine.optimizers import AdamOptimizerConfig, ExponentialDecaySchedulerConfig
+from nerfstudio.engine.optimizers import AdamOptimizerConfig
+from nerfstudio.engine.schedulers import ExponentialDecaySchedulerConfig
 from nerfstudio.engine.trainer import TrainerConfig
 from nerfstudio.models.splatfacto import SplatfactoModelConfig
 from nerfstudio.pipelines.base_pipeline import VanillaPipelineConfig
@@ -23,7 +26,7 @@ def run_4d_gs_reconstruction(
     data_dir: str,
     video_meta: list[dict], # List of {'path': str, 'start_t': float, 'end_t': float}
     output_dir: str = "outputs/dynamic_gs",
-    iterations: int = 30000
+    iterations: int = 5000
 ):
     """
     Runs a Dynamic Gaussian Splatting reconstruction optimized for 
@@ -45,7 +48,11 @@ def run_4d_gs_reconstruction(
                 # 1. TEMPORAL REASONING: 
                 # Note: Standard Splatfacto needs the 'dynamic' flag or a 
                 # custom deformation extension to be truly 4D.
-                
+                # to optimize and speed up execution.
+                stop_split_at=7000,          # Stop growing early
+                cull_alpha_thresh=0.05,      # Aggressive cleaning
+                densify_grad_thresh=0.005,   # Be picky about new points
+                sh_degree=2,                 # SH degree 2 is faster than 3
                 # 2. CAMERA OPTIMIZATION: Handles relative pose errors between videos
                 camera_optimizer=CameraOptimizerConfig(
                     mode="SO3xR3", 
@@ -144,6 +151,10 @@ def prepare_4d_datadir(
         "ns-process-data", "images",
         "--data", str(images_path),
         "--output-dir", str(output_path),
+        "--matcher-type", "sequential"
+        "--num-frames-target", "200"
+        "--max-num-features", "2000"
+        "--sfm-tool", "glomap"
         "--no-verbose"
     ], check=True)
 

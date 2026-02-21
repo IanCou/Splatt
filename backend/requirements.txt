@@ -7,3 +7,6 @@ pillow
 opencv-python-headless
 pydantic>=2.0.0
 langchain-core
+langchain-community
+pypdf
+faiss-cpu

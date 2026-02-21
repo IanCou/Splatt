@@ -11,6 +11,7 @@ from fastapi import FastAPI, File, UploadFile, HTTPException, Form, Body
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from PIL import Image
+from construction_safety import ConstructionSafetyRAG
 from pydantic import BaseModel
 
 from llm_service import get_gemini_service
@@ -50,6 +51,7 @@ class State:
     video_descriptors: Dict[str, Any] = {}
 
 state = State()
+safety_rag = ConstructionSafetyRAG()
 
 def extract_keyframes(video_path: str, interval_sec: int = 2) -> List[Image.Image]:
     keyframes = []
@@ -223,6 +225,23 @@ async def upload_video(video: UploadFile = File(...)):
 
     except Exception as e:
         print(f"Error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+class SafetyAnalysisRequest(BaseModel):
+    description: str
+
+@app.post("/analyze-safety")
+async def analyze_safety(request: SafetyAnalysisRequest):
+    """
+    Analyzes a construction scene description for safety hazards using RAG.
+    """
+    try:
+        result = safety_rag.evaluate_safety(request.description)
+        return {"analysis": result}
+    except Exception as e:
+        print(f"Safety analysis error: {e}")
+        import traceback
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/query")

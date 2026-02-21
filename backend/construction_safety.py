@@ -32,8 +32,8 @@ class ConstructionSafetyRAG:
         self.index_path = index_path
         self.model_name = model_name
         self.embeddings = GoogleGenerativeAIEmbeddings(model="models/gemini-embedding-001", google_api_key=self.api_key)
-        self.llm = ChatGoogleGenerativeAI(model=self.model_name, google_api_key=self.api_key, temperature=0.7)
-        
+        self.llm = ChatGoogleGenerativeAI(model=self.model_name, google_api_key=self.api_key, temperature=0)
+
         self.vector_store = None
         self.retriever = None
         self.rag_chain = None
@@ -80,12 +80,8 @@ class ConstructionSafetyRAG:
         Scene Description:
         {description}
         
-        Analysis Requirements:
-        1. Identify any potential safety hazards or violations.
-        2. Categorize the danger level (Safe, Low Risk, High Risk, Dangerous).
-        3. Provide specific safety recommendations based on the manual.
-        
-        Summary:
+        Task:
+        Strictly respond with ONLY one word: "Safe" if the scene follows safety protocols, or "Unsafe" if there are any potential hazards or violations. Do not provide any other text.
         """)
 
         def format_docs(docs):

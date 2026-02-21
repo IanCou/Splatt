@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useCallback } from "react"
+import { useState, useCallback, useEffect } from "react"
 import { ProjectBar } from "@/components/project-bar"
 import { QueryBar } from "@/components/query-bar"
 import { SceneViewer } from "@/components/scene-viewer"
@@ -9,8 +9,10 @@ import { LoadingOverlay } from "@/components/loading-overlay"
 import { VideoLibrary } from "@/components/video-library"
 import { Badge } from "@/components/ui/badge"
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs"
-import { AlertCircle, Map, Film } from "lucide-react"
+import { AlertCircle, Map as MapIcon, Film } from "lucide-react"
 import { hotspots, queryResults } from "@/lib/mock-data"
+import type { VideoDescriptor } from "@/lib/types"
+import useSWR from "swr"
 
 export default function SplattPage() {
   const [selectedProject, setSelectedProject] = useState("p1")
@@ -22,6 +24,39 @@ export default function SplattPage() {
   const [loadingQuery, setLoadingQuery] = useState("")
   const [noResults, setNoResults] = useState(false)
   const [activeTab, setActiveTab] = useState("scene") // FIX #1: Start with scene tab active
+
+  // Store video descriptors: Map<video_id, VideoDescriptor>
+  const [videoDescriptors, setVideoDescriptors] = useState<Map<string, VideoDescriptor>>(new Map())
+
+  // Fetch groups and extract descriptors
+  const { data: groupsData } = useSWR<{ groups: any[] }>(
+    "http://localhost:8000/api/videos/groups",
+    (url) => fetch(url).then((r) => r.json())
+  )
+
+  // Extract and store descriptors when groups data changes
+  useEffect(() => {
+    if (groupsData?.groups) {
+      const descriptors = new Map<string, VideoDescriptor>()
+      let totalDescriptors = 0
+
+      for (const group of groupsData.groups) {
+        for (const video of group.videos || []) {
+          if (video.descriptor) {
+            descriptors.set(video.id, video.descriptor)
+            totalDescriptors++
+          }
+        }
+      }
+
+      setVideoDescriptors(descriptors)
+      console.log('VIDEO_DESCRIPTORS_LOADED:', {
+        totalDescriptors,
+        videoIds: Array.from(descriptors.keys()),
+        sampleDescriptor: totalDescriptors > 0 ? descriptors.values().next().value : null
+      })
+    }
+  }, [groupsData])
 
   console.log('PAGE_STATE:', {
     activeTab,
@@ -44,13 +79,33 @@ export default function SplattPage() {
     const startTime = performance.now()
 
     try {
-      const formData = new FormData()
-      formData.append("query", query)
-      console.log('SCENE_QUERY_SENDING:', { url: 'http://localhost:8000/api/query', method: 'POST', query })
+      // Gather relevant descriptors (all descriptors, per Option B - send all for current group/all if no group)
+      const descriptorsArray = Array.from(videoDescriptors.values())
+      console.log('SCENE_QUERY_DESCRIPTORS:', {
+        descriptorCount: descriptorsArray.length,
+        videoIds: Array.from(videoDescriptors.keys())
+      })
+
+      // Build request body
+      const requestBody = {
+        query,
+        group_id: null, // Could be set if we add group filtering UI
+        descriptors: descriptorsArray
+      }
+
+      console.log('SCENE_QUERY_SENDING:', {
+        url: 'http://localhost:8000/api/query',
+        method: 'POST',
+        query,
+        descriptorCount: descriptorsArray.length
+      })
 
       const res = await fetch("http://localhost:8000/api/query", {
         method: "POST",
-        body: formData,
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(requestBody),
       })
 
       const endTime = performance.now()
@@ -145,7 +200,7 @@ export default function SplattPage() {
       setIsLoading(false)
       setNoResults(true)
     }
-  }, [])
+  }, [videoDescriptors])
 
   const handleHotspotClick = useCallback((id: string) => {
     setActiveHotspot(id)
@@ -205,7 +260,7 @@ export default function SplattPage() {
                 Videos
               </TabsTrigger>
               <TabsTrigger value="scene" className="gap-1.5 data-[state=active]:bg-card data-[state=active]:text-foreground">
-                <Map className="h-3.5 w-3.5" />
+                <MapIcon className="h-3.5 w-3.5" />
                 Site Scene
               </TabsTrigger>
             </TabsList>

@@ -23,65 +23,77 @@ export default function SplattPage() {
   const [noResults, setNoResults] = useState(false)
   const [activeTab, setActiveTab] = useState("videos")
 
-  const simulateSearch = useCallback((query: string) => {
+  const handleSearch = useCallback(async (query: string) => {
     setIsLoading(true)
     setLoadingQuery(query)
     setNoResults(false)
     setShowResults(false)
     setActiveHotspot(null)
 
-    const lowerQuery = query.toLowerCase()
+    try {
+      const formData = new FormData()
+      formData.append("query", query)
 
-    setTimeout(() => {
-      const matches: string[] = []
+      const res = await fetch("http://localhost:8000/api/query", {
+        method: "POST",
+        body: formData,
+      })
 
-      if (lowerQuery.includes("lumber") || lowerQuery.includes("wood") || lowerQuery.includes("2x4")) {
-        matches.push("h1")
-      }
-      if (lowerQuery.includes("concrete") || lowerQuery.includes("mixer") || lowerQuery.includes("pour")) {
-        matches.push("h2")
-      }
-      if (
-        lowerQuery.includes("south wall") ||
-        lowerQuery.includes("crew") ||
-        lowerQuery.includes("framing") ||
-        lowerQuery.includes("working")
-      ) {
-        matches.push("h3")
-      }
-      if (lowerQuery.includes("rebar") || lowerQuery.includes("delivery") || lowerQuery.includes("deliver")) {
-        matches.push("h4")
-      }
-      if (lowerQuery.includes("scaffold")) {
-        matches.push("h5")
-      }
-      if (lowerQuery.includes("tool") || lowerQuery.includes("storage") || lowerQuery.includes("circular saw")) {
-        matches.push("h6")
-      }
-      if (lowerQuery.includes("yesterday") || lowerQuery.includes("last")) {
-        matches.push("h5", "h1")
-      }
-      if (lowerQuery.includes("morning") || lowerQuery.includes("today")) {
-        matches.push("h4", "h2")
-      }
+      if (!res.ok) throw new Error("Query failed")
 
-      const uniqueMatches = [...new Set(matches)]
+      const data = await res.json()
 
       setIsLoading(false)
 
-      if (uniqueMatches.length > 0) {
-        setHighlightedHotspots(uniqueMatches)
-        const firstMatch = uniqueMatches[0]
+      if (data.hotspots && data.hotspots.length > 0) {
+        setHighlightedHotspots(data.hotspots)
+        const firstMatch = data.hotspots[0]
         setActiveHotspot(firstMatch)
-        setCurrentResult(queryResults[firstMatch] || null)
+
+        // Map Gemini response to QueryResult format
+        setCurrentResult({
+          id: firstMatch,
+          location: data.location || "Unknown Location",
+          coordinates: data.coordinates || "N/A",
+          timestamp: new Date().toLocaleString(),
+          worker: data.worker || "System",
+          workerRole: data.workerRole || "Assistant",
+          description: data.analysis,
+          confidence: data.confidence || "Medium",
+          thumbnails: [],
+          relatedQueries: []
+        })
+
         setShowResults(true)
-        // Switch to scene tab to show results on the map
         setActiveTab("scene")
       } else {
-        setHighlightedHotspots([])
-        setNoResults(true)
+        // Fallback for analysis with no specific hotspots
+        if (data.analysis) {
+          setHighlightedHotspots([])
+          setCurrentResult({
+            id: "gemini",
+            location: "Scene Wide",
+            coordinates: "N/A",
+            timestamp: new Date().toLocaleString(),
+            worker: "Gemini",
+            workerRole: "AI Analyst",
+            description: data.analysis,
+            confidence: data.confidence || "High",
+            thumbnails: [],
+            relatedQueries: ["Show overview", "What else is here?"]
+          })
+          setShowResults(true)
+          setActiveTab("scene")
+        } else {
+          setHighlightedHotspots([])
+          setNoResults(true)
+        }
       }
-    }, 1800)
+    } catch (err) {
+      console.error(err)
+      setIsLoading(false)
+      setNoResults(true)
+    }
   }, [])
 
   const handleHotspotClick = useCallback((id: string) => {
@@ -99,15 +111,15 @@ export default function SplattPage() {
 
   const handleRelatedQuery = useCallback(
     (query: string) => {
-      simulateSearch(query)
+      handleSearch(query)
     },
-    [simulateSearch]
+    [handleSearch]
   )
 
   return (
     <div className="flex h-dvh flex-col bg-background">
       <ProjectBar selectedProject={selectedProject} onProjectChange={setSelectedProject} />
-      <QueryBar onSubmit={simulateSearch} isLoading={isLoading} />
+      <QueryBar onSubmit={handleSearch} isLoading={isLoading} />
 
       {/* No results state */}
       {noResults && (

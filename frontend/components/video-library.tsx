@@ -191,7 +191,7 @@ function UploadItem({ upload, onDismiss }: { upload: UploadProgress; onDismiss: 
 }
 
 export function VideoLibrary() {
-  const { data, mutate, isLoading } = useSWR<{ groups: VideoGroup[] }>("/api/videos/groups", fetcher)
+  const { data, mutate, isLoading } = useSWR<{ groups: VideoGroup[] }>("http://localhost:8000/api/videos/groups", fetcher)
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set())
   const [uploads, setUploads] = useState<UploadProgress[]>([])
   const [isDragOver, setIsDragOver] = useState(false)
@@ -233,7 +233,7 @@ export function VideoLibrary() {
         const formData = new FormData()
         formData.append("video", file)
 
-        const res = await fetch("/api/videos/groups", { method: "POST", body: formData })
+        const res = await fetch("http://localhost:8000/api/videos/groups", { method: "POST", body: formData })
 
         if (!res.ok) throw new Error("Upload failed")
 

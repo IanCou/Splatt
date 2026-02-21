@@ -1,6 +1,49 @@
 #Usage: IDK I suffer u suffer
 # pip install pyglomap
 # pip install nerfstudio
+# Gloamap stuff!!
+#                       DEPENDENCIES
+#  sudo apt update
+# sudo apt-get install \
+#     git \
+#     cmake \
+#     ninja-build \
+#     build-essential \
+#     libboost-program-options-dev \
+#     libboost-graph-dev \
+#     libboost-system-dev \
+#     libeigen3-dev \
+#     libopenimageio-dev \
+#     openimageio-tools \
+#     libmetis-dev \
+#     libgoogle-glog-dev \
+#     libgtest-dev \
+#     libgmock-dev \
+#     libsqlite3-dev \
+#     libglew-dev \
+#     qt6-base-dev \
+#     libqt6opengl6-dev \
+#     libqt6openglwidgets6 \
+#     libcgal-dev \
+#     libceres-dev \
+#     libsuitesparse-dev \
+#     libcurl4-openssl-dev \
+#     libssl-dev \
+#     libmkl-full-dev
+#                        ACTUALLY getting the glomap
+# git clone https://github.com/colmap/glomap.git
+# cd glomap
+# mkdir build && cd build
+# cmake .. -GNinja
+# ninja
+# sudo ninja install
+#                           CONDA STUFF
+# conda activate nerfstudio
+# conda install -c conda-forge glomap
+#                           Ur Done
+
+
+
 
 from pathlib import Path
 from nerfstudio.configs.base_config import ViewerConfig
@@ -153,12 +196,14 @@ def prepare_4d_datadir(
         "ns-process-data", "images",
         "--data", str(images_path),
         "--output-dir", str(output_path),
-        "--matcher-type", "sequential",
-        "--num-frames-target", "100",
-        "--max-num-features", "2000",
+        "--matching-method", "sequential",
         "--sfm-tool", "glomap",
-        "--no-verbose"
+        "--num-features", "2000"
+        "--gpu",
+        "--verbose"
     ], check=True)
+    # useful flags --crop-border-pixels if bad data
+
 
     # 3. Inject the "Time" Dimension into transforms.json
     transforms_file = output_path / "transforms.json"

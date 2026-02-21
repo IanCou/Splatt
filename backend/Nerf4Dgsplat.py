@@ -43,13 +43,15 @@ def run_4d_gs_reconstruction(
                     load_3D_points=True,
                     # We assume transforms.json includes 'time' and 'video_id'
                 ),
+                cache_images="gpu",
+                cache_images_type="uint8"
             ),
             model=SplatfactoModelConfig(
                 # 1. TEMPORAL REASONING: 
                 # Note: Standard Splatfacto needs the 'dynamic' flag or a 
                 # custom deformation extension to be truly 4D.
                 # to optimize and speed up execution.
-                stop_split_at=7000,          # Stop growing early
+                stop_split_at=4000,          # Stop growing early
                 cull_alpha_thresh=0.05,      # Aggressive cleaning
                 densify_grad_thresh=0.005,   # Be picky about new points
                 # 2. CAMERA OPTIMIZATION: Handles relative pose errors between videos
@@ -82,8 +84,9 @@ def run_4d_gs_reconstruction(
                 "scheduler": ExponentialDecaySchedulerConfig(lr_final=1e-5, max_steps=iterations),
             },
         },
-        viewer=ViewerConfig(num_rays_per_chunk=1 << 15),
+        viewer=ViewerConfig(num_rays_per_chunk=1 << 15, quit_on_train_completion=True),
         base_dir=Path(output_dir),
+        mixed_precision=True
     )
 
     trainer = config.setup()
@@ -151,7 +154,7 @@ def prepare_4d_datadir(
         "--data", str(images_path),
         "--output-dir", str(output_path),
         "--matcher-type", "sequential"
-        "--num-frames-target", "200"
+        "--num-frames-target", "100"
         "--max-num-features", "2000"
         "--sfm-tool", "glomap"
         "--no-verbose"
@@ -291,3 +294,4 @@ if __name__ == "__main__":
     pass
     # model = videos_to_yml({videopath, global start, global end}, fps=2) time is in seconds, fps is how many frames sampled per second
     # export_4d_splat_to_ply(model, time)
+

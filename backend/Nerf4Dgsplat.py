@@ -1,235 +1,355 @@
-#Usage: IDK I suffer u suffer
-# pip install pyglomap
-# pip install nerfstudio
-# Gloamap stuff!!
-#                       DEPENDENCIES
-#  sudo apt update
-# sudo apt-get install \
-#     git \
-#     cmake \
-#     ninja-build \
-#     build-essential \
-#     libboost-program-options-dev \
-#     libboost-graph-dev \
-#     libboost-system-dev \
-#     libeigen3-dev \
-#     libopenimageio-dev \
-#     openimageio-tools \
-#     libmetis-dev \
-#     libgoogle-glog-dev \
-#     libgtest-dev \
-#     libgmock-dev \
-#     libsqlite3-dev \
-#     libglew-dev \
-#     qt6-base-dev \
-#     libqt6opengl6-dev \
-#     libqt6openglwidgets6 \
-#     libcgal-dev \
-#     libceres-dev \
-#     libsuitesparse-dev \
-#     libcurl4-openssl-dev \
-#     libssl-dev \
-#     libmkl-full-dev
-#                        ACTUALLY getting the glomap
-# git clone https://github.com/colmap/glomap.git
-# cd glomap
-# mkdir build && cd build
-# cmake .. -GNinja
-# ninja
-# sudo ninja install
-#                           CONDA STUFF
-# conda activate nerfstudio
-# conda install -c conda-forge glomap
-#                           Ur Done
+# Nerf4Dgsplat.py — Video-to-Gaussian-Splat Pipeline
+# Extracts frames from videos, estimates camera poses via COLMAP,
+# trains a Gaussian Splatting model using nerfstudio's Splatfacto,
+# and exports the result as a standard .ply file.
+#
+# Usage:
+#   python Nerf4Dgsplat.py
+#
+# Requirements:
+#   pip install nerfstudio plyfile
 
+from __future__ import annotations
 
-
-
+import json
+import subprocess
+import os
+from collections import OrderedDict
 from pathlib import Path
+from typing import Optional
+
+import torch
+import numpy as np
+from plyfile import PlyData, PlyElement
+
 from nerfstudio.configs.base_config import ViewerConfig
 from nerfstudio.data.datamanagers.full_images_datamanager import FullImageDatamanagerConfig
 from nerfstudio.data.dataparsers.nerfstudio_dataparser import NerfstudioDataParserConfig
 from nerfstudio.engine.optimizers import AdamOptimizerConfig
 from nerfstudio.engine.schedulers import ExponentialDecaySchedulerConfig
 from nerfstudio.engine.trainer import TrainerConfig
-from nerfstudio.models.splatfacto import SplatfactoModelConfig
+from nerfstudio.models.splatfacto import SplatfactoModel, SplatfactoModelConfig, SH2RGB
 from nerfstudio.pipelines.base_pipeline import VanillaPipelineConfig
 from nerfstudio.cameras.camera_optimizers import CameraOptimizerConfig
 from nerfstudio.utils.eval_utils import eval_setup
 
-import json
-import subprocess
-import os
-from pathlib import Path
-import torch
-import numpy as np
-from plyfile import PlyData, PlyElement
 
-def run_4d_gs_reconstruction(
+# ---------------------------------------------------------------------------
+# 1. TRAINING
+# ---------------------------------------------------------------------------
+
+def run_gs_reconstruction(
     data_dir: str,
-    video_meta: list[dict], # List of {'path': str, 'start_t': float, 'end_t': float}
-    output_dir: str = "outputs/dynamic_gs",
-    iterations: int = 5000
-):
+    output_dir: str = "outputs/gs",
+    iterations: int = 5000,
+) -> tuple[Path, SplatfactoModel]:
     """
-    Runs a Dynamic Gaussian Splatting reconstruction optimized for 
-    multiple videos with temporal offsets and potential occlusions.
+    Trains a Gaussian Splatting model (Splatfacto) on a prepared nerfstudio dataset.
+
+    Args:
+        data_dir: Path to a directory with transforms.json + images/ (nerfstudio format).
+        output_dir: Where to save checkpoints and config.
+        iterations: Number of training steps.
+
+    Returns:
+        (config_yaml_path, trained_model)
     """
-    
     config = TrainerConfig(
-        method_name="splatfacto", # Using Splatfacto with a deformation extension
+        method_name="splatfacto",
         max_num_iterations=iterations,
+        steps_per_save=1000,
+        steps_per_eval_image=500,
+        steps_per_eval_batch=500,
         pipeline=VanillaPipelineConfig(
             datamanager=FullImageDatamanagerConfig(
                 dataparser=NerfstudioDataParserConfig(
                     data=Path(data_dir),
                     load_3D_points=True,
-                    # We assume transforms.json includes 'time' and 'video_id'
                 ),
                 cache_images="gpu",
-                cache_images_type="uint8"
+                cache_images_type="uint8",
             ),
             model=SplatfactoModelConfig(
-                # 1. TEMPORAL REASONING: 
-                # Note: Standard Splatfacto needs the 'dynamic' flag or a 
-                # custom deformation extension to be truly 4D.
-                # to optimize and speed up execution.
-                stop_split_at=4000,          # Stop growing early
-                cull_alpha_thresh=0.05,      # Aggressive cleaning
-                densify_grad_thresh=0.005,   # Be picky about new points
-                # 2. CAMERA OPTIMIZATION: Handles relative pose errors between videos
-                camera_optimizer=CameraOptimizerConfig(
-                    mode="SO3xR3", 
-                    optimizer=AdamOptimizerConfig(lr=6e-4, eps=1e-15)
-                ),
-                
-                # 3. HANDLING BLUR/OCCLUSIONS:
-                # We use 'use_appearance_embedding' to help the model 
-                # 'ignore' transient objects like arms or motion blur artifacts.
-                use_appearance_embedding=True,
-                appearance_embed_dim=32,
-                
-                # Performance settings for 4D
+                stop_split_at=min(4000, iterations),
+                cull_alpha_thresh=0.05,
+                densify_grad_thresh=0.0005,
+                camera_optimizer=CameraOptimizerConfig(mode="SO3xR3"),
                 sh_degree=2,
                 num_downscales=2,
             ),
         ),
         optimizers={
-            "means": {"optimizer": AdamOptimizerConfig(lr=1.6e-4), "scheduler": None},
-            "quats": {"optimizer": AdamOptimizerConfig(lr=1.0e-3), "scheduler": None},
-            "scales": {"optimizer": AdamOptimizerConfig(lr=5e-3), "scheduler": None},
-            "opacities": {"optimizer": AdamOptimizerConfig(lr=5e-2), "scheduler": None},
-            "features_dc": {"optimizer": AdamOptimizerConfig(lr=2.5e-3), "scheduler": None},
-            "features_rest": {"optimizer": AdamOptimizerConfig(lr=1.25e-4), "scheduler": None},
-            # NEW: Optimizer for the Deformation Field (The 4th Dimension)
-            "deformation_field": {
-                "optimizer": AdamOptimizerConfig(lr=1e-3, eps=1e-15),
-                "scheduler": ExponentialDecaySchedulerConfig(lr_final=1e-5, max_steps=iterations),
+            "means": {
+                "optimizer": AdamOptimizerConfig(lr=1.6e-4, eps=1e-15),
+                "scheduler": None,
+            },
+            "quats": {
+                "optimizer": AdamOptimizerConfig(lr=1.0e-3, eps=1e-15),
+                "scheduler": None,
+            },
+            "scales": {
+                "optimizer": AdamOptimizerConfig(lr=5e-3, eps=1e-15),
+                "scheduler": None,
+            },
+            "opacities": {
+                "optimizer": AdamOptimizerConfig(lr=5e-2, eps=1e-15),
+                "scheduler": None,
+            },
+            "features_dc": {
+                "optimizer": AdamOptimizerConfig(lr=2.5e-3, eps=1e-15),
+                "scheduler": None,
+            },
+            "features_rest": {
+                "optimizer": AdamOptimizerConfig(lr=1.25e-4, eps=1e-15),
+                "scheduler": None,
+            },
+            "camera_opt": {
+                "optimizer": AdamOptimizerConfig(lr=6e-4, eps=1e-15),
+                "scheduler": None,
             },
         },
+        vis="tensorboard",  # headless-compatible; no viewer server needed
         viewer=ViewerConfig(num_rays_per_chunk=1 << 15, quit_on_train_completion=True),
-        base_dir=Path(output_dir),
-        mixed_precision=True
+        output_dir=Path(output_dir),
+        mixed_precision=True,
     )
 
+    # --- Critical: setup() creates pipeline, optimizers, etc. ---
     trainer = config.setup()
-    trainer.train()
-    return trainer.pipeline.model
+    trainer.setup()
 
-def load_4d_model_into_memory(config_path: str):
+    # Save config.yml NOW (before training, so it's always written even if training crashes)
+    config.save_config()
+
+    trainer.train()
+
+    config_yaml = trainer.base_dir / "config.yml"
+    ckpt_dir = trainer.checkpoint_dir
+    print(f"✅ Training complete.")
+    print(f"   Config:      {config_yaml}")
+    print(f"   Checkpoints: {ckpt_dir}")
+
+    return config_yaml, trainer.pipeline.model
+
+
+# ---------------------------------------------------------------------------
+# 2. EXPORT DIRECTLY FROM CHECKPOINT (no config.yml needed)
+# ---------------------------------------------------------------------------
+
+def export_from_checkpoint(
+    ckpt_path: str | Path,
+    out_rgb: str | Path = "./splat_rgb.ply",
+    out_sh: str | Path = "./splat_sh.ply",
+) -> None:
     """
-    Loads the YAML config and the associated model weights into a usable Pipeline.
+    Re-exports a .ply from a raw nerfstudio checkpoint without needing config.yml.
+    Produces two files:
+      - RGB PLY:  works in ALL viewers (supersplat, antimatter15, etc.)
+      - SH PLY:   higher quality in viewers that support spherical harmonics
+
+    Args:
+        ckpt_path: Path to a step-XXXXXX.ckpt file.
+        out_rgb: Output path for the RGB PLY.
+        out_sh:  Output path for the SH PLY.
+    """
+    C0 = 0.28209479177387814  # SH DC normalization constant
+
+    print(f"Loading checkpoint: {ckpt_path}")
+    ckpt = torch.load(str(ckpt_path), map_location="cpu")
+    p = ckpt["pipeline"]
+
+    means   = p["_model.gauss_params.means"].float().numpy()
+    f_dc    = p["_model.gauss_params.features_dc"].float().numpy()   # [N,3]
+    f_rest  = p["_model.gauss_params.features_rest"].float().numpy() # [N,K,3]
+    opacs   = p["_model.gauss_params.opacities"].float().numpy()     # [N,1]
+    scales  = p["_model.gauss_params.scales"].float().numpy()        # [N,3]
+    quats   = p["_model.gauss_params.quats"].float().numpy()         # [N,4]
+
+    N = means.shape[0]
+    colors_01 = np.clip(f_dc * C0 + 0.5, 0.0, 1.0)  # SH DC -> linear RGB
+
+    # Filter NaN/Inf and near-invisible Gaussians
+    select = (
+        np.isfinite(means).all(axis=1) &
+        np.isfinite(colors_01).all(axis=1) &
+        (opacs.squeeze() >= -5.5373)  # logit(1/255)
+    )
+    n = int(select.sum())
+    removed = N - n
+    if removed:
+        print(f"  Filtered {removed:,}/{N:,} NaN/low-opacity Gaussians")
+    print(f"  Exporting {n:,} Gaussians")
+
+    means_f  = means[select].astype(np.float32)
+    f_dc_f   = f_dc[select].astype(np.float32)
+    f_rest_f = f_rest[select].astype(np.float32)
+    opacs_f  = opacs[select].squeeze().astype(np.float32)
+    scales_f = scales[select].astype(np.float32)
+    quats_f  = quats[select].astype(np.float32)
+    colors_u8 = (colors_01[select] * 255).astype(np.uint8)
+
+    def _build_common_header(m):
+        m["x"] = means_f[:, 0]; m["y"] = means_f[:, 1]; m["z"] = means_f[:, 2]
+        m["nx"] = np.zeros(n, np.float32)
+        m["ny"] = np.zeros(n, np.float32)
+        m["nz"] = np.zeros(n, np.float32)
+
+    def _build_common_tail(m):
+        m["opacity"] = opacs_f
+        for i in range(3): m[f"scale_{i}"] = scales_f[:, i]
+        for i in range(4): m[f"rot_{i}"]   = quats_f[:, i]
+
+    # RGB PLY
+    rgb_map: OrderedDict[str, np.ndarray] = OrderedDict()
+    _build_common_header(rgb_map)
+    rgb_map["red"] = colors_u8[:, 0]
+    rgb_map["green"] = colors_u8[:, 1]
+    rgb_map["blue"]  = colors_u8[:, 2]
+    _build_common_tail(rgb_map)
+    Path(out_rgb).parent.mkdir(parents=True, exist_ok=True)
+    _write_gs_ply(str(out_rgb), n, rgb_map)
+    print(f"✅ RGB PLY -> {out_rgb}")
+
+    # SH PLY
+    sh_map: OrderedDict[str, np.ndarray] = OrderedDict()
+    _build_common_header(sh_map)
+    for i in range(3): sh_map[f"f_dc_{i}"] = f_dc_f[:, i]
+    # Transpose [N,K,3] -> [N,3,K] -> flatten [N, K*3], matching inria format
+    shs_rest_t = f_rest_f.transpose(0, 2, 1).reshape(n, -1)
+    for i in range(shs_rest_t.shape[1]): sh_map[f"f_rest_{i}"] = shs_rest_t[:, i]
+    _build_common_tail(sh_map)
+    Path(out_sh).parent.mkdir(parents=True, exist_ok=True)
+    _write_gs_ply(str(out_sh), n, sh_map)
+    print(f"✅ SH  PLY -> {out_sh}")
+
+
+# ---------------------------------------------------------------------------
+# 3. MODEL LOADING
+# ---------------------------------------------------------------------------
+
+def load_model_into_memory(config_path: str | Path):
+    """
+    Loads a trained model checkpoint from a config.yml path.
+
+    Returns:
+        (pipeline, model)
     """
     config_path = Path(config_path)
-    
-    # eval_setup returns a tuple: (Config, Pipeline, CheckpointPath, Step)
-    # The 'pipeline' object contains your model.
-    config, pipeline, checkpoint_path, step = eval_setup(
+    _, pipeline, checkpoint_path, step = eval_setup(
         config_path,
-        test_mode="inference" # "inference" disables training-specific gradients
+        test_mode="inference",
     )
-    
-    print(f"Successfully loaded model from {checkpoint_path} at step {step}")
-    
-    # If you just want the 4D Model itself:
+    print(f"✅ Loaded model from {checkpoint_path} at step {step}")
+
     model = pipeline.model
-    model.eval() # Set to evaluation mode (crucial for 4D deformation)
-    
+    model.eval()
     return pipeline, model
 
-def prepare_4d_datadir(
-    video_configs: list[dict], # list of {'path': 'v1.mp4', 'start_sec': 0, 'end_sec': 10}
+
+# ---------------------------------------------------------------------------
+# 3. DATA PREPARATION
+# ---------------------------------------------------------------------------
+
+def prepare_datadir(
+    video_configs: list[dict],
     output_dir: str = "data_prepared",
-    fps: int = 2
-):
+    fps: int = 2,
+) -> str:
     """
-    Extracts frames, runs COLMAP for camera poses, and injects 4D temporal data.
+    Extracts frames from video(s), runs COLMAP for camera poses,
+    and injects temporal metadata into transforms.json.
+
+    Args:
+        video_configs: List of dicts with keys 'path', 'start_sec', 'end_sec'.
+        output_dir: Where to write the nerfstudio-format dataset.
+        fps: Frames per second to extract from each video.
+
+    Returns:
+        Path to the prepared data directory.
     """
     output_path = Path(output_dir)
     images_path = output_path / "images"
     images_path.mkdir(parents=True, exist_ok=True)
 
-    # 1. Determine Global Timeline
+    # Timeline info
     all_starts = [v['start_sec'] for v in video_configs]
     all_ends = [v['end_sec'] for v in video_configs]
     global_start = min(all_starts)
     global_duration = max(all_ends) - global_start
+    if global_duration <= 0:
+        global_duration = 1.0  # avoid division by zero
 
-    print(f"--- Extracting Frames and Calculating 4D Timestamps ---")
-    
+    # Extraction folder
+    extracted_path = output_path / "extracted_images"
+    if extracted_path.exists():
+        for f in extracted_path.glob("*.jpg"):
+            f.unlink()
+    if images_path.exists():
+        for f in images_path.glob("*.jpg"):
+            f.unlink()
+    extracted_path.mkdir(parents=True, exist_ok=True)
+
+    print("--- Extracting Frames ---")
     for i, v in enumerate(video_configs):
         v_path = Path(v['path'])
-        # Extract frames using ffmpeg
-        # We name them video_{i}_frame_{n}.jpg to keep them unique
+        duration = v['end_sec'] - v['start_sec']
         cmd = [
-            "ffmpeg", "-i", str(v_path), 
-            "-vf", f"fps={fps}", 
-            "-q:v", "2", 
-            str(images_path / f"vid_{i}_%04d.jpg")
+            "ffmpeg", "-y",
+            "-ss", str(v['start_sec']),
+            "-t", str(duration),
+            "-i", str(v_path),
+            "-vf", f"fps={fps}",
+            "-q:v", "2",
+            str(extracted_path / f"vid_{i}_%04d.jpg"),
         ]
-        subprocess.run(cmd, check=True)
+        subprocess.run(cmd, check=True, capture_output=True)
 
-    # 2. Run Nerfstudio Pose Estimation
-    # This aligns all cameras from all videos into one 3D coordinate system.
-    print(f"--- Running COLMAP (This may take a while) ---")
+    # Run COLMAP pose estimation via nerfstudio
+    print("--- Running COLMAP (this may take a while) ---")
     subprocess.run([
-        "ns-process-data", "images",
-        "--data", str(images_path),
+        "/opt/miniforge3/envs/nerf/bin/ns-process-data", "images",
+        "--data", str(extracted_path),
         "--output-dir", str(output_path),
-        "--matching-method", "sequential",
-        "--sfm-tool", "glomap",
-        "--num-features", "2000"
-        "--gpu",
-        "--verbose"
+        "--matcher-type", "any",
+        "--sfm-tool", "colmap",
+        "--no-verbose",
+        "--no-gpu",
     ], check=True)
-    # useful flags --crop-border-pixels if bad data
 
-
-    # 3. Inject the "Time" Dimension into transforms.json
+    # Inject temporal metadata into transforms.json
     transforms_file = output_path / "transforms.json"
     with open(transforms_file, "r") as f:
         data = json.load(f)
 
-    print(f"--- Injecting Temporal Data into transforms.json ---")
-    for frame in data["frames"]:
-        # Extract video index and frame number from filename: vid_{i}_{num}.jpg
-        file_name = Path(frame["file_path"]).name
-        parts = file_name.split("_")
+    print("--- Injecting Temporal Data into transforms.json ---")
+
+    orig_images_sorted = sorted([f.name for f in extracted_path.glob("vid_*.jpg")])
+
+    frame_name_to_info = {}
+    for idx, orig_name in enumerate(orig_images_sorted):
+        processed_frame_name = f"frame_{idx + 1:05d}.jpg"
+
+        parts = orig_name.split("_")
         vid_idx = int(parts[1])
         frame_num = int(parts[2].split(".")[0])
 
-        # Calculate local time in seconds: (frame_num - 1) / fps
         local_time_sec = (frame_num - 1) / fps
-        
-        # Calculate global absolute time
         abs_time = video_configs[vid_idx]['start_sec'] + local_time_sec
-        
-        # Normalize to 0.0 - 1.0 for the 4D Gaussian model
         normalized_time = (abs_time - global_start) / global_duration
-        
-        # Add to the JSON object
-        frame["time"] = round(float(normalized_time), 4)
-        frame["video_id"] = vid_idx # Useful for appearance embeddings/blurry frames
+
+        frame_name_to_info[processed_frame_name] = {
+            "time": round(float(normalized_time), 4),
+            "video_id": vid_idx,
+        }
+
+    for frame in data["frames"]:
+        file_name = Path(frame["file_path"]).name
+        if file_name in frame_name_to_info:
+            info = frame_name_to_info[file_name]
+            frame["time"] = info["time"]
+            frame["video_id"] = info["video_id"]
+        else:
+            print(f"  Warning: Could not find temporal info for {file_name}")
 
     with open(transforms_file, "w") as f:
         json.dump(data, f, indent=4)
@@ -237,108 +357,201 @@ def prepare_4d_datadir(
     print(f"--- Done! data_dir is ready at: {output_dir} ---")
     return str(output_path)
 
-# Example Usage:
-# videos = [
-#     {"path": "drone_shot.mp4", "start_sec": 0, "end_sec": 30},
-#     {"path": "handheld_close_up.mp4", "start_sec": 15, "end_sec": 45}
-# ]
-# prepare_4d_datadir(videos)
 
+# ---------------------------------------------------------------------------
+# 4. FULL PIPELINE
+# ---------------------------------------------------------------------------
 
-def videos_to_yml(meta_data, output_dir = "./", fps = 2):
-    model = run_4d_gs_reconstruction(prepare_4d_datadir(meta_data, fps=fps), meta_data, output_dir=output_dir)
-    return model
-
-def get_3d_splat_at_time(model_path, global_time: float):
+def videos_to_splat(
+    meta_data: list[dict],
+    output_dir: str = "./",
+    fps: int = 2,
+    iterations: int = 5000,
+) -> tuple[Path, SplatfactoModel]:
     """
-    Extracts the deformed 3D Gaussian parameters at a specific timestamp.
+    End-to-end: videos -> data preparation -> training -> model.
+
+    Returns:
+        (config_yaml_path, trained_model)
     """
-    model = load_4d_model_into_memory(model_path)[1]
+    data_dir = prepare_datadir(meta_data, fps=fps)
+    config_path, model = run_gs_reconstruction(
+        data_dir, output_dir=output_dir, iterations=iterations,
+    )
+    return config_path, model
+
+
+# ---------------------------------------------------------------------------
+# 5. SPLAT DATA EXTRACTION
+# ---------------------------------------------------------------------------
+
+def get_splat_data(model: SplatfactoModel) -> dict[str, torch.Tensor]:
+    """
+    Extracts the Gaussian Splatting parameters from a trained model.
+
+    Returns a dict with keys: xyz, colors, opacities, scales, quats.
+    All tensors are detached and on CPU.
+    """
     model.eval()
-    
-    # 1. Prepare the time input (must be a tensor on the correct device)
-    # Most 4D models expect a tensor of shape [num_gaussians, 1]
-    t = torch.full((model.num_gaussians, 1), global_time).to(model.device)
-    
     with torch.no_grad():
-        # 2. Query the deformation field
-        # Note: Method names vary slightly by plugin, but 'get_gaussian_deltas' 
-        # or 'deformation_field' are standard.
-        offsets, scale_deltas, quat_deltas = model.deformation_field(model.means, t)
-        
-        # 3. Apply the deformation to the canonical (base) splat
-        deformed_means = model.means + offsets
-        deformed_scales = model.scales + scale_deltas
-        deformed_quats = model.quats + quat_deltas
-        
-        # 4. Get the colors (usually static or SH-based)
-        colors = model.get_colors() 
+        return {
+            "xyz": model.means.detach().cpu(),
+            "colors": model.colors.detach().cpu(),       # RGB in [0, 1]
+            "opacities": model.opacities.detach().cpu(),  # raw logits
+            "scales": model.scales.detach().cpu(),         # raw log-scales
+            "quats": model.quats.detach().cpu(),
+        }
 
-    return {
-        "xyz": deformed_means,
-        "rgba": torch.cat([colors, model.get_opacity()], dim=-1),
-        "scales": deformed_scales,
-        "quats": deformed_quats
-    }
 
-def export_4d_splat_to_ply(model, global_time: float, output_path = "./"):
+# ---------------------------------------------------------------------------
+# 6. PLY EXPORT   (compatible with standard GS viewers)
+# ---------------------------------------------------------------------------
+
+def export_splat_to_ply(
+    model: SplatfactoModel,
+    output_path: str | Path = "./splat.ply",
+    color_mode: str = "sh_coeffs",
+) -> None:
     """
-    Bakes the 4D deformation at a specific time and saves it as a 3D .ply file.
+    Exports a trained Splatfacto model to a standard Gaussian Splatting .ply file.
+    This follows the same format as nerfstudio's built-in exporter, ensuring
+    compatibility with web viewers (e.g. antimatter15, playcanvas, etc.).
+
+    Args:
+        model: A trained SplatfactoModel instance.
+        output_path: Where to save the .ply file.
+        color_mode: "sh_coeffs" for full SH data (default), or "rgb" for simple RGB.
     """
-    model.eval()
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # 1. Calculate the deformation for the given time
-    # We create a time tensor matching the number of gaussians
-    t = torch.full((model.num_gaussians, 1), global_time).to(model.device)
-    
+    model.eval()
+    map_to_tensors: OrderedDict[str, np.ndarray] = OrderedDict()
+
     with torch.no_grad():
-        # Get the offsets from the 4D deformation field
-        # Note: In most 4D implementations, this returns (xyz_offsets, scale_offsets, quat_offsets)
-        offsets, _, _ = model.deformation_field(model.means, t)
-        
-        # Apply offsets to get the 3D positions at this specific moment
-        xyz = (model.means + offsets).cpu().numpy()
-        
-        # Get other attributes (colors, opacity, scales)
-        # Colors are converted from Spherical Harmonics to basic RGB for standard PLY compatibility
-        colors = model.get_colors().cpu().numpy() * 255
-        opacities = model.get_opacity().cpu().numpy()
-        scales = model.scales.cpu().numpy()
-        quats = model.quats.cpu().numpy()
+        positions = model.means.cpu().numpy()
+        n = positions.shape[0]
 
-    # 2. Construct the PLY data structure
-    # Standard Gaussian Splatting PLY format includes: x, y, z, nx, ny, nz, red, green, blue, opacity, etc.
-    dtype = [
-        ('x', 'f4'), ('y', 'f4'), ('z', 'f4'),
-        ('red', 'u1'), ('green', 'u1'), ('blue', 'u1'),
-        ('opacity', 'f4')
-    ]
-    
-    # We add scales and quats if you plan to use this in a specialized GS renderer
-    for i in range(3): dtype.append((f'scale_{i}', 'f4'))
-    for i in range(4): dtype.append((f'rot_{i}', 'f4'))
+        # Positions
+        map_to_tensors["x"] = positions[:, 0].astype(np.float32)
+        map_to_tensors["y"] = positions[:, 1].astype(np.float32)
+        map_to_tensors["z"] = positions[:, 2].astype(np.float32)
 
-    elements = np.empty(xyz.shape[0], dtype=dtype)
-    
-    elements['x'], elements['y'], elements['z'] = xyz[:, 0], xyz[:, 1], xyz[:, 2]
-    elements['red'], elements['green'], elements['blue'] = colors[:, 0], colors[:, 1], colors[:, 2]
-    elements['opacity'] = opacities.squeeze()
-    
-    for i in range(3): elements[f'scale_{i}'] = scales[:, i]
-    for i in range(4): elements[f'rot_{i}'] = quats[:, i]
+        # Normals (zeros — standard for GS PLY)
+        map_to_tensors["nx"] = np.zeros(n, dtype=np.float32)
+        map_to_tensors["ny"] = np.zeros(n, dtype=np.float32)
+        map_to_tensors["nz"] = np.zeros(n, dtype=np.float32)
 
-    # 3. Write to file
-    el = PlyElement.describe(elements, 'vertex')
-    PlyData([el]).write(str(output_path))
-    
-    print(f"Exported baked 3D splat (time={global_time}) to {output_path}")
+        # Colors
+        if color_mode == "rgb":
+            colors = torch.clamp(model.colors, 0.0, 1.0).cpu().numpy()
+            colors_u8 = (colors * 255).astype(np.uint8)
+            map_to_tensors["red"] = colors_u8[:, 0]
+            map_to_tensors["green"] = colors_u8[:, 1]
+            map_to_tensors["blue"] = colors_u8[:, 2]
+        else:
+            # Spherical harmonics — DC component
+            shs_0 = model.shs_0.contiguous().cpu().numpy()
+            for i in range(shs_0.shape[1]):
+                map_to_tensors[f"f_dc_{i}"] = shs_0[:, i, None].astype(np.float32)
+
+            # Higher-order SH bands
+            if model.config.sh_degree > 0:
+                shs_rest = model.shs_rest.transpose(1, 2).contiguous().cpu().numpy()
+                shs_rest = shs_rest.reshape((n, -1))
+                for i in range(shs_rest.shape[-1]):
+                    map_to_tensors[f"f_rest_{i}"] = shs_rest[:, i, None].astype(np.float32)
+
+        # Opacity (raw logits, same as nerfstudio export)
+        map_to_tensors["opacity"] = model.opacities.data.cpu().numpy().astype(np.float32)
+
+        # Scales (raw log-scales)
+        scales = model.scales.data.cpu().numpy()
+        for i in range(3):
+            map_to_tensors[f"scale_{i}"] = scales[:, i, None].astype(np.float32)
+
+        # Quaternions
+        quats = model.quats.data.cpu().numpy()
+        for i in range(4):
+            map_to_tensors[f"rot_{i}"] = quats[:, i, None].astype(np.float32)
+
+    # Filter NaN/Inf values
+    select = np.ones(n, dtype=bool)
+    for k, t in map_to_tensors.items():
+        select &= np.isfinite(t).reshape(n) if t.ndim > 1 else np.isfinite(t)
+
+    # Filter near-invisible Gaussians (opacity logit < logit(1/255) ≈ -5.54)
+    opa = map_to_tensors["opacity"].squeeze()
+    select &= opa >= -5.5373
+
+    filtered_count = n - int(select.sum())
+    if filtered_count > 0:
+        print(f"  Filtered {filtered_count}/{n} Gaussians (NaN/Inf/low-opacity)")
+        for k in map_to_tensors:
+            map_to_tensors[k] = map_to_tensors[k][select]
+        n = int(select.sum())
+
+    # Write PLY (binary format, compatible with standard GS viewers)
+    _write_gs_ply(str(output_path), n, map_to_tensors)
+    print(f"✅ Exported {n} Gaussians to {output_path}")
+
+
+def _write_gs_ply(
+    filename: str,
+    count: int,
+    map_to_tensors: OrderedDict[str, np.ndarray],
+) -> None:
+    """Write a binary PLY file in standard Gaussian Splatting format."""
+    with open(filename, "wb") as f:
+        f.write(b"ply\n")
+        f.write(b"format binary_little_endian 1.0\n")
+        f.write(b"comment Generated by Nerf4Dgsplat\n")
+        f.write(f"element vertex {count}\n".encode())
+
+        for key, tensor in map_to_tensors.items():
+            dtype_str = "float" if tensor.dtype.kind == "f" else "uchar"
+            f.write(f"property {dtype_str} {key}\n".encode())
+
+        f.write(b"end_header\n")
+
+        for i in range(count):
+            for tensor in map_to_tensors.values():
+                val = tensor[i]
+                if tensor.dtype.kind == "f":
+                    f.write(np.float32(val).tobytes())
+                elif tensor.dtype == np.uint8:
+                    f.write(val.tobytes())
+
+
+# ---------------------------------------------------------------------------
+# 7. ENTRY POINT
+# ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    pass
-    # model = videos_to_yml([dict1, dict2...], fps=2) time is in seconds, fps is how many frames sampled per second
-    # export_4d_splat_to_ply(model, time)
-    # default put stuff in current directory
-    # example {"path": "drone_shot.mp4", "start_sec": 0, "end_sec": 30},
+    # --- Configure your video(s) here ---
+    videos = [{
+        "path": "./IMG_0040.MOV",
+        "start_sec": 0,
+        "end_sec": 8,
+    }]
 
+    # Run the full pipeline: extract frames -> COLMAP -> train -> export
+    config_path, model = videos_to_splat(
+        videos,
+        output_dir="./",
+        fps=5,
+        iterations=5000,
+    )
+
+    # Export as RGB (works in all viewers, no gray dots)
+    export_splat_to_ply(model, "./baked_splat.ply", color_mode="rgb")
+    # Also export SH version for advanced viewers that support it
+    export_splat_to_ply(model, "./baked_splat_sh.ply", color_mode="sh_coeffs")
+
+    print(f"\n🎉 Pipeline complete!")
+    print(f"   Config:       {config_path}")
+    print(f"   PLY (RGB):    ./baked_splat.ply        ← use this in most viewers")
+    print(f"   PLY (SH):     ./baked_splat_sh.ply     ← higher quality in advanced viewers")
+
+    print(f"\nTo reload the model later:")
+    print(f'   pipeline, model = load_model_into_memory("{config_path}")')

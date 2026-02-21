@@ -1,6 +1,12 @@
 fastapi
 uvicorn
 python-multipart
-google-generativeai
 python-dotenv
 pillow
+supabase
+opencv-python
+moviepy
+langchain
+langchain-core
+langchain-google-genai
+langchain-community

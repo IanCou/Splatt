@@ -50,21 +50,9 @@ const fetcher = (url: string) => fetch(url).then((r) => r.json())
 function VideoCard({ video }: { video: VideoGroup["videos"][number] }) {
   return (
     <div className="flex items-center gap-3 rounded-lg border border-border bg-background p-3 transition-colors hover:border-primary/30">
-      {/* Thumbnail placeholder */}
-      <div className="flex h-12 w-20 shrink-0 items-center justify-center rounded-md bg-muted">
-        <Film className="h-5 w-5 text-muted-foreground" />
-      </div>
       <div className="min-w-0 flex-1">
         <p className="truncate text-sm font-medium text-foreground">{video.originalName}</p>
         <div className="mt-1 flex items-center gap-3 text-xs text-muted-foreground">
-          <span className="flex items-center gap-1">
-            <Clock className="h-3 w-3" />
-            {formatDuration(video.duration)}
-          </span>
-          <span className="flex items-center gap-1">
-            <HardDrive className="h-3 w-3" />
-            {formatBytes(video.size)}
-          </span>
           <span>{formatDate(video.uploadedAt)}</span>
         </div>
       </div>
@@ -115,10 +103,6 @@ function GroupCard({
               <FileVideo className="h-3 w-3" />
               {group.videoCount} video{group.videoCount !== 1 ? "s" : ""}
             </span>
-            <span className="flex items-center gap-1">
-              <Clock className="h-3 w-3" />
-              {formatDuration(group.totalDuration)}
-            </span>
           </div>
           {isExpanded ? (
             <ChevronDown className="h-4 w-4 text-muted-foreground" />
@@ -135,10 +119,6 @@ function GroupCard({
             <span className="flex items-center gap-1">
               <FileVideo className="h-3 w-3" />
               {group.videoCount} video{group.videoCount !== 1 ? "s" : ""}
-            </span>
-            <span className="flex items-center gap-1">
-              <Clock className="h-3 w-3" />
-              {formatDuration(group.totalDuration)}
             </span>
           </div>
           <div className="flex flex-col gap-2">

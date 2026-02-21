@@ -3,7 +3,7 @@
 import { useEffect, useRef } from "react"
 import { Badge } from "@/components/ui/badge"
 import { Box, Move3D } from "lucide-react"
-import type { Hotspot } from "@/lib/mock-data"
+import type { Hotspot } from "@/lib/types"
 
 interface SceneViewerProps {
   hotspots: Hotspot[]
@@ -39,30 +39,26 @@ function HotspotDot({
     >
       {/* Pulse ring */}
       <span
-        className={`absolute inset-0 -m-2 animate-ping rounded-full opacity-40 ${typeColor[spot.type]} ${
-          isActive ? "opacity-60" : isHighlighted ? "opacity-50" : ""
-        }`}
+        className={`absolute inset-0 -m-2 animate-ping rounded-full opacity-40 ${typeColor[spot.type]} ${isActive ? "opacity-60" : isHighlighted ? "opacity-50" : ""
+          }`}
         style={{ animationDuration: isActive ? "1s" : "2.5s" }}
       />
       {/* Outer glow */}
       <span
-        className={`absolute inset-0 -m-1.5 rounded-full ${typeColor[spot.type]} ${
-          isActive ? "opacity-30" : "opacity-15"
-        } transition-opacity group-hover:opacity-30`}
+        className={`absolute inset-0 -m-1.5 rounded-full ${typeColor[spot.type]} ${isActive ? "opacity-30" : "opacity-15"
+          } transition-opacity group-hover:opacity-30`}
       />
       {/* Dot */}
       <span
-        className={`relative block h-3.5 w-3.5 rounded-full border-2 border-background shadow-lg transition-transform ${typeColor[spot.type]} ${
-          isActive ? "scale-125" : "group-hover:scale-110"
-        }`}
+        className={`relative block h-3.5 w-3.5 rounded-full border-2 border-background shadow-lg transition-transform ${typeColor[spot.type]} ${isActive ? "scale-125" : "group-hover:scale-110"
+          }`}
       />
       {/* Label */}
       <span
-        className={`absolute left-1/2 top-full mt-1.5 -translate-x-1/2 whitespace-nowrap rounded-md px-2 py-0.5 text-xs font-medium transition-opacity ${
-          isActive
-            ? "bg-primary text-primary-foreground opacity-100"
-            : "bg-card text-card-foreground opacity-0 group-hover:opacity-100"
-        } border border-border shadow-md`}
+        className={`absolute left-1/2 top-full mt-1.5 -translate-x-1/2 whitespace-nowrap rounded-md px-2 py-0.5 text-xs font-medium transition-opacity ${isActive
+          ? "bg-primary text-primary-foreground opacity-100"
+          : "bg-card text-card-foreground opacity-0 group-hover:opacity-100"
+          } border border-border shadow-md`}
       >
         {spot.label}
       </span>
@@ -82,6 +78,7 @@ export function SceneViewer({ hotspots, activeHotspot, onHotspotClick, highlight
     const draw = () => {
       const dpr = window.devicePixelRatio || 1
       const rect = canvas.getBoundingClientRect()
+      if (rect.width === 0 || rect.height === 0) return
       canvas.width = rect.width * dpr
       canvas.height = rect.height * dpr
       ctx.scale(dpr, dpr)
@@ -166,10 +163,10 @@ export function SceneViewer({ hotspots, activeHotspot, onHotspotClick, highlight
     const observer = new ResizeObserver(draw)
     observer.observe(canvas)
     return () => observer.disconnect()
-  }, [])
+  }, [hotspots, activeHotspot, highlightedHotspots])
 
   return (
-    <div className="relative flex-1 overflow-hidden rounded-xl border border-border bg-card">
+    <div className="absolute inset-0 overflow-hidden rounded-xl border border-border bg-card">
       <canvas ref={canvasRef} className="absolute inset-0 h-full w-full" />
 
       {/* Hotspots */}
@@ -196,10 +193,10 @@ export function SceneViewer({ hotspots, activeHotspot, onHotspotClick, highlight
       <div className="absolute bottom-4 left-4 right-4 flex items-center justify-between">
         <div className="flex items-center gap-1.5 rounded-lg bg-background/80 px-3 py-1.5 text-xs text-muted-foreground backdrop-blur-sm">
           <Move3D className="h-3.5 w-3.5" />
-          Rotate | Pan | Zoom
+          Click hotspots to explore
         </div>
         <Badge variant="outline" className="border-border bg-background/80 text-xs backdrop-blur-sm">
-          Gaussian Splatting - integration in progress
+          Gaussian Splatting – integration in progress
         </Badge>
       </div>
     </div>

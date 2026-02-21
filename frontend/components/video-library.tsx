@@ -9,6 +9,12 @@ import { Progress } from "@/components/ui/progress"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Separator } from "@/components/ui/separator"
 import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog"
+import {
   Upload,
   Video,
   FolderOpen,
@@ -22,8 +28,26 @@ import {
   HardDrive,
   Film,
   X,
+  Play,
 } from "lucide-react"
 import type { VideoGroup, UploadProgress } from "@/lib/types"
+
+// ─── Types ────────────────────────────────────────────────────────────────────
+
+interface VideoItem {
+  id: string
+  filename: string
+  originalName: string
+  duration: number
+  size: number
+  uploadedAt: string
+  status: "processing" | "ready" | "error"
+  thumbnail?: string | null
+  url?: string | null
+  groupId: string | null
+}
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
 
 function formatDuration(seconds: number): string {
   const h = Math.floor(seconds / 3600)
@@ -45,15 +69,40 @@ function formatDate(iso: string): string {
   return d.toLocaleDateString("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })
 }
 
+// Strip the backend origin so URLs are relative (proxied by Next.js /data/:path* rewrite).
+// This prevents CORS / mixed-content issues when the browser streams video.
+function toRelativeUrl(url: string | null | undefined): string | null {
+  if (!url) return null
+  return url.replace(/^https?:\/\/localhost:\d+/, "")
+}
+
 const fetcher = (url: string) => fetch(url).then((r) => r.json())
 
-function VideoCard({ video }: { video: VideoGroup["videos"][number] }) {
+// ─── VideoCard ────────────────────────────────────────────────────────────────
+
+function VideoCard({ video, onPlay }: { video: VideoItem; onPlay: (v: VideoItem) => void }) {
   return (
-    <div className="flex items-center gap-3 rounded-lg border border-border bg-background p-3 transition-colors hover:border-primary/30">
-      {/* Thumbnail placeholder */}
-      <div className="flex h-12 w-20 shrink-0 items-center justify-center rounded-md bg-muted">
-        <Film className="h-5 w-5 text-muted-foreground" />
+    <div
+      onClick={() => onPlay(video)}
+      className="group flex cursor-pointer items-center gap-3 rounded-lg border border-border bg-background p-3 transition-colors hover:border-primary/30"
+    >
+      {/* Thumbnail */}
+      <div className="relative flex h-12 w-20 shrink-0 items-center justify-center overflow-hidden rounded-md bg-muted">
+        {video.thumbnail ? (
+          <img
+            src={toRelativeUrl(video.thumbnail) ?? ""}
+            alt={video.originalName}
+            className="h-full w-full object-cover"
+          />
+        ) : (
+          <Film className="h-5 w-5 text-muted-foreground" />
+        )}
+        <div className="absolute inset-0 flex items-center justify-center bg-black/30 opacity-0 transition-opacity group-hover:opacity-100">
+          <Play className="h-5 w-5 fill-white text-white drop-shadow" />
+        </div>
       </div>
+
+      {/* Info */}
       <div className="min-w-0 flex-1">
         <p className="truncate text-sm font-medium text-foreground">{video.originalName}</p>
         <div className="mt-1 flex items-center gap-3 text-xs text-muted-foreground">
@@ -68,6 +117,8 @@ function VideoCard({ video }: { video: VideoGroup["videos"][number] }) {
           <span>{formatDate(video.uploadedAt)}</span>
         </div>
       </div>
+
+      {/* Status badge */}
       <Badge
         variant="outline"
         className={
@@ -87,14 +138,18 @@ function VideoCard({ video }: { video: VideoGroup["videos"][number] }) {
   )
 }
 
+// ─── GroupCard ────────────────────────────────────────────────────────────────
+
 function GroupCard({
   group,
   isExpanded,
   onToggle,
+  onPlay,
 }: {
   group: VideoGroup
   isExpanded: boolean
   onToggle: () => void
+  onPlay: (v: VideoItem) => void
 }) {
   return (
     <Card className="gap-0 overflow-hidden border-border bg-card">
@@ -130,20 +185,9 @@ function GroupCard({
 
       {isExpanded && (
         <div className="border-t border-border bg-secondary/30 p-3">
-          {/* Mobile stats */}
-          <div className="mb-3 flex items-center gap-3 text-xs text-muted-foreground sm:hidden">
-            <span className="flex items-center gap-1">
-              <FileVideo className="h-3 w-3" />
-              {group.videoCount} video{group.videoCount !== 1 ? "s" : ""}
-            </span>
-            <span className="flex items-center gap-1">
-              <Clock className="h-3 w-3" />
-              {formatDuration(group.totalDuration)}
-            </span>
-          </div>
           <div className="flex flex-col gap-2">
-            {group.videos.map((video) => (
-              <VideoCard key={video.id} video={video} />
+            {(group.videos as VideoItem[]).map((video) => (
+              <VideoCard key={video.id} video={video} onPlay={onPlay} />
             ))}
             {group.videos.length === 0 && (
               <p className="py-4 text-center text-sm text-muted-foreground">No videos in this group yet</p>
@@ -154,6 +198,8 @@ function GroupCard({
     </Card>
   )
 }
+
+// ─── UploadItem ───────────────────────────────────────────────────────────────
 
 function UploadItem({ upload, onDismiss }: { upload: UploadProgress; onDismiss: () => void }) {
   return (
@@ -174,7 +220,7 @@ function UploadItem({ upload, onDismiss }: { upload: UploadProgress; onDismiss: 
           <span className="shrink-0 text-xs text-muted-foreground">{upload.progress}%</span>
         </div>
         {upload.status === "processing" && (
-          <p className="mt-1 text-xs text-muted-foreground">Analyzing and grouping footage...</p>
+          <p className="mt-1 text-xs text-muted-foreground">Analyzing and grouping footage…</p>
         )}
         {upload.status === "error" && upload.error && (
           <p className="mt-1 text-xs text-destructive">{upload.error}</p>
@@ -190,10 +236,76 @@ function UploadItem({ upload, onDismiss }: { upload: UploadProgress; onDismiss: 
   )
 }
 
+// ─── VideoPreviewModal ────────────────────────────────────────────────────────
+
+function VideoPreviewModal({ video, onClose }: { video: VideoItem | null; onClose: () => void }) {
+  return (
+    <Dialog open={!!video} onOpenChange={(open) => !open && onClose()}>
+      <DialogContent className="max-w-4xl border-border bg-card p-0 overflow-hidden">
+        <DialogHeader className="flex flex-row items-center gap-2 p-4 border-b border-border">
+          <Film className="h-4 w-4 text-primary shrink-0" />
+          <DialogTitle className="text-foreground truncate">{video?.originalName ?? "Video Preview"}</DialogTitle>
+        </DialogHeader>
+
+        <div className="relative w-full bg-black" style={{ aspectRatio: "16/9" }}>
+          {video?.url ? (
+            <video
+              key={video.url}          /* remount on every new selection */
+              autoPlay
+              controls
+              playsInline
+              className="absolute inset-0 h-full w-full"
+            >
+              <source src={toRelativeUrl(video.url) ?? ""} />
+              Your browser does not support the video tag.
+            </video>
+          ) : (
+            <div className="flex h-full items-center justify-center text-muted-foreground">
+              <Film className="h-12 w-12 opacity-30" />
+            </div>
+          )}
+        </div>
+
+        {/* Meta */}
+        {video && (
+          <div className="flex items-center gap-4 px-4 py-3 text-xs text-muted-foreground border-t border-border">
+            <span className="flex items-center gap-1">
+              <Clock className="h-3 w-3" />
+              {formatDuration(video.duration)}
+            </span>
+            <span className="flex items-center gap-1">
+              <HardDrive className="h-3 w-3" />
+              {formatBytes(video.size)}
+            </span>
+            <span>{formatDate(video.uploadedAt)}</span>
+            <Badge
+              variant="outline"
+              className={
+                video.status === "ready"
+                  ? "border-primary/30 bg-primary/10 text-primary ml-auto"
+                  : "ml-auto"
+              }
+            >
+              {video.status}
+            </Badge>
+          </div>
+        )}
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+// ─── VideoLibrary (main export) ───────────────────────────────────────────────
+
 export function VideoLibrary() {
-  const { data, mutate, isLoading } = useSWR<{ groups: VideoGroup[] }>("http://localhost:8000/api/videos/groups", fetcher)
+  const { data, mutate, isLoading } = useSWR<{ groups: VideoGroup[] }>(
+    "http://localhost:8000/api/videos/groups",
+    fetcher,
+    { refreshInterval: 5000 }
+  )
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set())
   const [uploads, setUploads] = useState<UploadProgress[]>([])
+  const [selectedVideo, setSelectedVideo] = useState<VideoItem | null>(null)
   const [isDragOver, setIsDragOver] = useState(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
 
@@ -209,46 +321,37 @@ export function VideoLibrary() {
   const uploadFile = useCallback(
     async (file: File) => {
       const uploadId = `upload-${Date.now()}-${Math.random().toString(36).slice(2)}`
-
-      const newUpload: UploadProgress = {
-        id: uploadId,
-        filename: file.name,
-        progress: 0,
-        status: "uploading",
-      }
-
+      const newUpload: UploadProgress = { id: uploadId, filename: file.name, progress: 0, status: "uploading" }
       setUploads((prev) => [newUpload, ...prev])
 
-      // Simulate upload progress
+      // Animate upload progress to 70 %
       for (let p = 10; p <= 70; p += 15) {
         await new Promise((r) => setTimeout(r, 300))
         setUploads((prev) => prev.map((u) => (u.id === uploadId ? { ...u, progress: p } : u)))
       }
 
-      setUploads((prev) =>
-        prev.map((u) => (u.id === uploadId ? { ...u, progress: 80, status: "processing" } : u))
-      )
+      setUploads((prev) => prev.map((u) => (u.id === uploadId ? { ...u, progress: 80, status: "processing" } : u)))
 
       try {
         const formData = new FormData()
         formData.append("video", file)
 
-        const res = await fetch("http://localhost:8000/api/videos/groups", { method: "POST", body: formData })
+        const res = await fetch("http://localhost:8000/api/videos/groups", {
+          method: "POST",
+          body: formData,
+        })
 
         if (!res.ok) throw new Error("Upload failed")
-
         const result = await res.json()
 
         setUploads((prev) =>
           prev.map((u) => (u.id === uploadId ? { ...u, progress: 100, status: "complete" } : u))
         )
 
-        // Expand the group this video was assigned to
         if (result.group?.id) {
           setExpandedGroups((prev) => new Set(prev).add(result.group.id))
         }
 
-        // Refresh the groups list
         mutate()
       } catch {
         setUploads((prev) =>
@@ -265,9 +368,7 @@ export function VideoLibrary() {
     (files: FileList | null) => {
       if (!files) return
       Array.from(files).forEach((file) => {
-        if (file.type.startsWith("video/")) {
-          uploadFile(file)
-        }
+        if (file.type.startsWith("video/")) uploadFile(file)
       })
     },
     [uploadFile]
@@ -292,8 +393,8 @@ export function VideoLibrary() {
 
   return (
     <div className="flex flex-1 flex-col overflow-hidden">
-      {/* Header bar */}
-      <div className="flex items-center justify-between px-4 pb-3 md:px-6">
+      {/* Header */}
+      <div className="flex items-center justify-between px-4 pb-3 shrink-0 md:px-6">
         <div className="flex items-center gap-3">
           <div className="flex items-center gap-2">
             <Video className="h-4 w-4 text-primary" />
@@ -331,7 +432,7 @@ export function VideoLibrary() {
 
       {/* Active uploads */}
       {uploads.length > 0 && (
-        <div className="mx-4 mb-3 flex flex-col gap-2 md:mx-6">
+        <div className="mx-4 mb-3 flex flex-col gap-2 shrink-0 md:mx-6">
           {uploads.map((upload) => (
             <UploadItem key={upload.id} upload={upload} onDismiss={() => dismissUpload(upload.id)} />
           ))}
@@ -341,10 +442,7 @@ export function VideoLibrary() {
       {/* Drop zone + groups list */}
       <div
         className="relative mx-4 flex flex-1 flex-col overflow-hidden md:mx-6"
-        onDragOver={(e) => {
-          e.preventDefault()
-          setIsDragOver(true)
-        }}
+        onDragOver={(e) => { e.preventDefault(); setIsDragOver(true) }}
         onDragLeave={() => setIsDragOver(false)}
         onDrop={handleDrop}
       >
@@ -369,11 +467,10 @@ export function VideoLibrary() {
           <div className="flex flex-1 items-center justify-center">
             <div className="flex flex-col items-center gap-3">
               <Loader2 className="h-6 w-6 animate-spin text-primary" />
-              <p className="text-sm text-muted-foreground">Loading video library...</p>
+              <p className="text-sm text-muted-foreground">Loading video library…</p>
             </div>
           </div>
         ) : groups.length === 0 ? (
-          /* Empty state */
           <div className="flex flex-1 items-center justify-center rounded-xl border border-dashed border-border">
             <div className="flex flex-col items-center gap-4 px-6 py-12">
               <div className="flex h-16 w-16 items-center justify-center rounded-2xl bg-secondary">
@@ -397,20 +494,19 @@ export function VideoLibrary() {
             </div>
           </div>
         ) : (
-          <ScrollArea className="flex-1 pb-4">
-            <div className="flex flex-col gap-3">
+          <ScrollArea className="flex-1">
+            <div className="flex flex-col gap-3 pb-4">
               {groups.map((group) => (
                 <GroupCard
                   key={group.id}
                   group={group}
                   isExpanded={expandedGroups.has(group.id)}
                   onToggle={() => toggleGroup(group.id)}
+                  onPlay={(v) => setSelectedVideo(v)}
                 />
               ))}
             </div>
-
-            {/* Drop hint at bottom */}
-            <Separator className="my-4 bg-border" />
+            <Separator className="my-2 bg-border" />
             <div className="flex items-center justify-center gap-2 pb-2 text-xs text-muted-foreground">
               <Upload className="h-3 w-3" />
               <span>Drag and drop videos anywhere to upload</span>
@@ -418,6 +514,9 @@ export function VideoLibrary() {
           </ScrollArea>
         )}
       </div>
+
+      {/* Video preview dialog */}
+      <VideoPreviewModal video={selectedVideo} onClose={() => setSelectedVideo(null)} />
     </div>
   )
 }

@@ -15,7 +15,7 @@ import {
   ArrowRight,
   Shield,
 } from "lucide-react"
-import type { QueryResult } from "@/lib/mock-data"
+import type { QueryResult } from "@/lib/types"
 
 interface ResultsPanelProps {
   result: QueryResult | null
@@ -123,7 +123,7 @@ export function ResultsPanel({ result, onClose, onRelatedQuery, isVisible }: Res
 
       {/* Related Queries */}
       <div>
-        <p className="mb-2.5 text-xs font-medium text-muted-foreground">Related Scenes</p>
+        <p className="mb-2.5 text-xs font-medium text-muted-foreground">Related Queries</p>
         <div className="flex flex-col gap-1.5">
           {result.relatedQueries.map((rq) => (
             <button
@@ -137,6 +137,27 @@ export function ResultsPanel({ result, onClose, onRelatedQuery, isVisible }: Res
           ))}
         </div>
       </div>
+
+      {/* Related Scenes (Groups) */}
+      {result.relatedGroupIds && result.relatedGroupIds.length > 0 && (
+        <div>
+          <p className="mb-2.5 text-xs font-medium text-muted-foreground">Related Project Data</p>
+          <div className="flex flex-col gap-1.5">
+            {result.relatedGroupIds.map((gid) => (
+              <div
+                key={gid}
+                className="flex items-center justify-between rounded-lg border border-border bg-secondary px-3 py-2.5 text-sm text-foreground"
+              >
+                <span className="flex items-center gap-2">
+                  <ArrowRight className="h-3 w-3 text-primary" />
+                  View Related: {gid}
+                </span>
+                <Badge variant="outline" className="text-[10px] uppercase">PROJECT DATA</Badge>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
     </div>
   )
 }

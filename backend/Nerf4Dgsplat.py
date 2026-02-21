@@ -153,10 +153,10 @@ def prepare_4d_datadir(
         "ns-process-data", "images",
         "--data", str(images_path),
         "--output-dir", str(output_path),
-        "--matcher-type", "sequential"
-        "--num-frames-target", "100"
-        "--max-num-features", "2000"
-        "--sfm-tool", "glomap"
+        "--matcher-type", "sequential",
+        "--num-frames-target", "100",
+        "--max-num-features", "2000",
+        "--sfm-tool", "glomap",
         "--no-verbose"
     ], check=True)
 
@@ -292,6 +292,8 @@ def export_4d_splat_to_ply(model, global_time: float, output_path = "./"):
 
 if __name__ == "__main__":
     pass
-    # model = videos_to_yml({videopath, global start, global end}, fps=2) time is in seconds, fps is how many frames sampled per second
+    # model = videos_to_yml([dict1, dict2...], fps=2) time is in seconds, fps is how many frames sampled per second
     # export_4d_splat_to_ply(model, time)
+    # default put stuff in current directory
+    # example {"path": "drone_shot.mp4", "start_sec": 0, "end_sec": 30},
 

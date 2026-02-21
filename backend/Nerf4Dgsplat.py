@@ -41,7 +41,7 @@ from nerfstudio.utils.eval_utils import eval_setup
 def run_gs_reconstruction(
     data_dir: str,
     output_dir: str = "outputs/gs",
-    iterations: int = 5000,
+    iterations: int = 10000,
 ) -> tuple[Path, SplatfactoModel]:
     """
     Trains a Gaussian Splatting model (Splatfacto) on a prepared nerfstudio dataset.
@@ -70,12 +70,12 @@ def run_gs_reconstruction(
                 cache_images_type="uint8",
             ),
             model=SplatfactoModelConfig(
-                stop_split_at=min(4000, iterations),
+                stop_split_at=min(30000, iterations),
                 cull_alpha_thresh=0.05,
-                densify_grad_thresh=0.0005,
+                densify_grad_thresh=0.0003,
                 camera_optimizer=CameraOptimizerConfig(mode="SO3xR3"),
                 sh_degree=2,
-                num_downscales=2,
+                num_downscales=1,
             ),
         ),
         optimizers={
@@ -253,7 +253,7 @@ def load_model_into_memory(config_path: str | Path):
 def prepare_datadir(
     video_configs: list[dict],
     output_dir: str = "data_prepared",
-    fps: int = 2,
+    fps: int = 4,
 ) -> str:
     """
     Extracts frames from video(s), runs COLMAP for camera poses,
@@ -365,8 +365,8 @@ def prepare_datadir(
 def videos_to_splat(
     meta_data: list[dict],
     output_dir: str = "./",
-    fps: int = 2,
-    iterations: int = 5000,
+    fps: int = 4,
+    iterations: int = 30000,
 ) -> tuple[Path, SplatfactoModel]:
     """
     End-to-end: videos -> data preparation -> training -> model.
@@ -540,7 +540,7 @@ if __name__ == "__main__":
         videos,
         output_dir="./",
         fps=5,
-        iterations=5000,
+        iterations=30000,
     )
 
     # Export as RGB (works in all viewers, no gray dots)

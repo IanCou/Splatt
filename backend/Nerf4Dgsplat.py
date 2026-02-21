@@ -52,7 +52,6 @@ def run_4d_gs_reconstruction(
                 stop_split_at=7000,          # Stop growing early
                 cull_alpha_thresh=0.05,      # Aggressive cleaning
                 densify_grad_thresh=0.005,   # Be picky about new points
-                sh_degree=2,                 # SH degree 2 is faster than 3
                 # 2. CAMERA OPTIMIZATION: Handles relative pose errors between videos
                 camera_optimizer=CameraOptimizerConfig(
                     mode="SO3xR3", 
@@ -66,7 +65,7 @@ def run_4d_gs_reconstruction(
                 appearance_embed_dim=32,
                 
                 # Performance settings for 4D
-                sh_degree=3,
+                sh_degree=2,
                 num_downscales=2,
             ),
         ),
@@ -198,7 +197,7 @@ def prepare_4d_datadir(
 # prepare_4d_datadir(videos)
 
 
-def videos_to_yml(meta_data, output_dir, fps = 2):
+def videos_to_yml(meta_data, output_dir = "./", fps = 2):
     model = run_4d_gs_reconstruction(prepare_4d_datadir(meta_data, fps=fps), meta_data, output_dir=output_dir)
     return model
 
@@ -234,7 +233,7 @@ def get_3d_splat_at_time(model_path, global_time: float):
         "quats": deformed_quats
     }
 
-def export_4d_splat_to_ply(model, global_time: float, output_path: str):
+def export_4d_splat_to_ply(model, global_time: float, output_path = "./"):
     """
     Bakes the 4D deformation at a specific time and saves it as a 3D .ply file.
     """
@@ -287,3 +286,8 @@ def export_4d_splat_to_ply(model, global_time: float, output_path: str):
     PlyData([el]).write(str(output_path))
     
     print(f"Exported baked 3D splat (time={global_time}) to {output_path}")
+
+if __name__ == "__main__":
+    pass
+    # model = videos_to_yml({videopath, global start, global end}, fps=2) time is in seconds, fps is how many frames sampled per second
+    # export_4d_splat_to_ply(model, time)

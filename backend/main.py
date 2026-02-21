@@ -236,10 +236,19 @@ async def query_scene(request: QueryRequest):
     - descriptors: Optional array of video descriptors for enhanced context
     """
     print(f"\n{'='*80}")
-    print(f"[BACKEND] Query endpoint called")
+    print(f"[BACKEND] Query endpoint called - REQUEST RECEIVED")
     print(f"[BACKEND] Query: {request.query}")
     print(f"[BACKEND] Group ID: {request.group_id}")
     print(f"[BACKEND] Descriptors provided: {len(request.descriptors) if request.descriptors else 0}")
+
+    if request.descriptors and len(request.descriptors) > 0:
+        print(f"[BACKEND] First descriptor sample:")
+        first_desc = request.descriptors[0]
+        print(f"  - video_id: {first_desc.get('video_id', 'N/A')}")
+        print(f"  - filename: {first_desc.get('filename', 'N/A')}")
+        print(f"  - scene_type: {first_desc.get('scene_type', 'N/A')}")
+        print(f"  - keys: {list(first_desc.keys())[:10]}")  # First 10 keys
+
     print(f"[BACKEND] Total scenes available: {len(state.scenes)}")
     print(f"[BACKEND] Scene keys: {list(state.scenes.keys())}")
     print(f"{'='*80}\n")
@@ -318,19 +327,29 @@ async def query_scene(request: QueryRequest):
         return JSONResponse(content=result)
     except Exception as e:
         logger.error(f"Query error: {e}")
-        print(f"[BACKEND] ERROR during query: {e}")
+        print(f"\n[BACKEND] ====== ERROR DURING QUERY ======")
+        print(f"[BACKEND] Error type: {type(e).__name__}")
+        print(f"[BACKEND] Error message: {str(e)}")
         import traceback
-        print(f"[BACKEND] Traceback:\n{traceback.format_exc()}")
-        # Fallback with all required fields
-        return JSONResponse(content={
-            "analysis": f"Error processing query: {str(e)}",
-            "confidence": "Low",
-            "hotspots": [],
-            "location": None,
-            "coordinates": None,
-            "worker": None,
-            "workerRole": None
-        })
+        print(f"[BACKEND] Full traceback:")
+        print(traceback.format_exc())
+        print(f"[BACKEND] ===================================\n")
+
+        # Return error with proper status code
+        return JSONResponse(
+            status_code=500,
+            content={
+                "analysis": f"Error processing query: {str(e)}",
+                "confidence": "Low",
+                "hotspots": [],
+                "location": None,
+                "coordinates": None,
+                "worker": None,
+                "workerRole": None,
+                "error": str(e),
+                "error_type": type(e).__name__
+            }
+        )
 
 if __name__ == "__main__":
     import uvicorn

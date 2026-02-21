@@ -68,7 +68,11 @@ export default function SplattPage() {
   })
 
   const handleSearch = useCallback(async (query: string) => {
-    console.log('SCENE_QUERY_INITIATED:', { query, timestamp: new Date().toISOString() })
+    console.log('SCENE_QUERY_INITIATED:', {
+      query,
+      timestamp: new Date().toISOString(),
+      descriptorsInState: videoDescriptors.size
+    })
 
     setIsLoading(true)
     setLoadingQuery(query)
@@ -83,8 +87,17 @@ export default function SplattPage() {
       const descriptorsArray = Array.from(videoDescriptors.values())
       console.log('SCENE_QUERY_DESCRIPTORS:', {
         descriptorCount: descriptorsArray.length,
-        videoIds: Array.from(videoDescriptors.keys())
+        videoIds: Array.from(videoDescriptors.keys()),
+        hasDescriptors: descriptorsArray.length > 0
       })
+
+      // Warn if no descriptors available
+      if (descriptorsArray.length === 0) {
+        console.warn('SCENE_QUERY_NO_DESCRIPTORS:', {
+          message: 'No video descriptors found in state - query will use basic context only',
+          videoDescriptorsSize: videoDescriptors.size
+        })
+      }
 
       // Build request body
       const requestBody = {
@@ -99,6 +112,32 @@ export default function SplattPage() {
         query,
         descriptorCount: descriptorsArray.length
       })
+
+      // Log full request payload for debugging
+      console.log('SCENE_QUERY_REQUEST_BODY:', {
+        query: requestBody.query,
+        group_id: requestBody.group_id,
+        descriptors_count: requestBody.descriptors?.length || 0,
+        descriptors_sample: requestBody.descriptors?.[0] ? {
+          video_id: requestBody.descriptors[0].video_id,
+          filename: requestBody.descriptors[0].filename,
+          scene_type: requestBody.descriptors[0].scene_type,
+          people_count: requestBody.descriptors[0].people?.length || 0,
+          zones_count: requestBody.descriptors[0].spatial_zones?.length || 0,
+          snapshots_count: requestBody.descriptors[0].frame_snapshots?.length || 0
+        } : null
+      })
+
+      // Check if descriptors can be stringified (JSON serialization test)
+      try {
+        const testJson = JSON.stringify(requestBody)
+        console.log('SCENE_QUERY_JSON_SIZE:', {
+          bytes: testJson.length,
+          kilobytes: (testJson.length / 1024).toFixed(2) + 'KB'
+        })
+      } catch (jsonErr) {
+        console.error('SCENE_QUERY_JSON_SERIALIZATION_ERROR:', jsonErr)
+      }
 
       const res = await fetch("http://localhost:8000/api/query", {
         method: "POST",
@@ -116,9 +155,47 @@ export default function SplattPage() {
       })
 
       if (!res.ok) {
-        const errorText = await res.text().catch(() => 'Unable to read error response')
-        console.error('SCENE_QUERY_ERROR:', { status: res.status, statusText: res.statusText, errorText })
-        throw new Error("Query failed")
+        // Try to parse error as JSON first (FastAPI returns JSON errors)
+        let errorDetails: any = null
+        let errorText = ''
+
+        try {
+          const errorBody = await res.text()
+          errorText = errorBody
+
+          // Try parsing as JSON
+          try {
+            errorDetails = JSON.parse(errorBody)
+            console.error('SCENE_QUERY_ERROR_JSON:', {
+              status: res.status,
+              statusText: res.statusText,
+              errorDetails,
+              detail: errorDetails.detail // FastAPI puts error details here
+            })
+          } catch {
+            // Not JSON, just log as text
+            console.error('SCENE_QUERY_ERROR_TEXT:', {
+              status: res.status,
+              statusText: res.statusText,
+              errorText: errorText.substring(0, 500) // First 500 chars
+            })
+          }
+        } catch (readErr) {
+          console.error('SCENE_QUERY_ERROR_UNABLE_TO_READ:', {
+            status: res.status,
+            statusText: res.statusText,
+            readError: readErr
+          })
+        }
+
+        // Log what we were trying to send when error occurred
+        console.error('SCENE_QUERY_ERROR_CONTEXT:', {
+          query,
+          descriptorsSent: descriptorsArray.length,
+          requestBodyKeys: Object.keys(requestBody)
+        })
+
+        throw new Error(`Query failed: ${res.status} ${res.statusText}`)
       }
 
       const data = await res.json()
@@ -195,8 +272,24 @@ export default function SplattPage() {
       console.error('SCENE_QUERY_FAILED:', {
         error: err,
         message: err instanceof Error ? err.message : 'Unknown error',
-        totalTime: `${(endTime - startTime).toFixed(2)}ms`
+        stack: err instanceof Error ? err.stack : undefined,
+        totalTime: `${(endTime - startTime).toFixed(2)}ms`,
+        query,
+        descriptorCount: descriptorsArray.length
       })
+
+      // Additional debugging: check if it's a network error vs backend error
+      if (err instanceof TypeError) {
+        console.error('SCENE_QUERY_NETWORK_ERROR:', {
+          message: 'Possible network/CORS issue or backend not running',
+          error: err.message
+        })
+      } else if (err instanceof Error && err.message.includes('Query failed')) {
+        console.error('SCENE_QUERY_BACKEND_ERROR:', {
+          message: 'Backend returned an error - check logs above for details'
+        })
+      }
+
       setIsLoading(false)
       setNoResults(true)
     }

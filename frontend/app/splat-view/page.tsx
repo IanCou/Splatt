@@ -16,12 +16,15 @@ export default function SplatViewPage() {
         if (!ptPath) return;
         setIsLoading(true);
 
-        // Ensure path ends with .splat for the browser to help the loader
-        // though the backend will treat it as .pt
+        // Support .ply, .pt, or .splat
         let displayPath = ptPath;
-        if (displayPath.endsWith('.pt')) {
-            displayPath = displayPath.replace('.pt', '.splat');
-        } else if (!displayPath.endsWith('.splat')) {
+        const lowerPath = displayPath.toLowerCase();
+
+        if (lowerPath.endsWith('.pt')) {
+            displayPath = displayPath.replace(/\.pt$/i, '.splat');
+        } else if (lowerPath.endsWith('.ply')) {
+            displayPath = displayPath.replace(/\.ply$/i, '.splat');
+        } else if (!lowerPath.endsWith('.splat')) {
             displayPath = displayPath + '.splat';
         }
 

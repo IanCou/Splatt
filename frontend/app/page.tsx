@@ -75,8 +75,6 @@ export default function SplattPage() {
         setActiveHotspot(firstMatch)
         setCurrentResult(queryResults[firstMatch] || null)
         setShowResults(true)
-        // Switch to scene tab to show results on the map
-        setActiveTab("scene")
       } else {
         setHighlightedHotspots([])
         setNoResults(true)
@@ -110,7 +108,7 @@ export default function SplattPage() {
       <QueryBar onSubmit={simulateSearch} isLoading={isLoading} />
 
       {/* No results state */}
-      {noResults && (
+      {noResults && !showResults && (
         <div className="mx-4 mb-3 flex items-center gap-2 rounded-lg border border-destructive/30 bg-destructive/10 px-4 py-3 md:mx-6">
           <AlertCircle className="h-4 w-4 shrink-0 text-destructive" />
           <p className="text-sm text-foreground">
@@ -119,8 +117,8 @@ export default function SplattPage() {
         </div>
       )}
 
-      {/* Highlighted count */}
-      {highlightedHotspots.length > 0 && !isLoading && (
+      {/* Highlighted count -- hide when results panel is open */}
+      {highlightedHotspots.length > 0 && !isLoading && !showResults && (
         <div className="mx-4 mb-3 flex items-center gap-2 md:mx-6">
           <Badge variant="outline" className="gap-1.5 border-primary/30 bg-primary/10 text-primary">
             {highlightedHotspots.length} result{highlightedHotspots.length !== 1 ? "s" : ""} found
@@ -129,47 +127,52 @@ export default function SplattPage() {
         </div>
       )}
 
-      {/* Tabs to switch between videos and scene */}
+      {/* Main content area -- results take over full screen when active */}
       <div className="flex flex-1 flex-col overflow-hidden">
-        <Tabs value={activeTab} onValueChange={setActiveTab} className="flex flex-1 flex-col overflow-hidden">
-          <div className="px-4 pb-3 md:px-6">
-            <TabsList className="bg-secondary">
-              <TabsTrigger value="videos" className="gap-1.5 data-[state=active]:bg-card data-[state=active]:text-foreground">
-                <Film className="h-3.5 w-3.5" />
-                Videos
-              </TabsTrigger>
-              <TabsTrigger value="scene" className="gap-1.5 data-[state=active]:bg-card data-[state=active]:text-foreground">
-                <Map className="h-3.5 w-3.5" />
-                Site Scene
-              </TabsTrigger>
-            </TabsList>
-          </div>
-
-          <TabsContent value="videos" className="flex flex-1 flex-col overflow-hidden pb-4">
-            <VideoLibrary />
-          </TabsContent>
-
-          <TabsContent value="scene" className="flex flex-1 flex-col overflow-hidden">
-            <div className="relative flex flex-1 flex-col overflow-hidden px-4 pb-4 md:flex-row md:px-6 md:pb-6">
-              <div className="relative flex-1">
-                <SceneViewer
-                  hotspots={hotspots}
-                  activeHotspot={activeHotspot}
-                  onHotspotClick={handleHotspotClick}
-                  highlightedHotspots={highlightedHotspots}
-                />
-                <LoadingOverlay isVisible={isLoading} query={loadingQuery} />
-              </div>
-
-              <ResultsPanel
-                result={currentResult}
-                onClose={handleCloseResults}
-                onRelatedQuery={handleRelatedQuery}
-                isVisible={showResults}
-              />
+        {showResults && currentResult ? (
+          <ResultsPanel
+            result={currentResult}
+            hotspots={hotspots}
+            activeHotspot={activeHotspot}
+            highlightedHotspots={highlightedHotspots}
+            onHotspotClick={handleHotspotClick}
+            onClose={handleCloseResults}
+            onRelatedQuery={handleRelatedQuery}
+          />
+        ) : (
+          <Tabs value={activeTab} onValueChange={setActiveTab} className="flex flex-1 flex-col overflow-hidden">
+            <div className="px-4 pb-3 md:px-6">
+              <TabsList className="bg-secondary">
+                <TabsTrigger value="videos" className="gap-1.5 data-[state=active]:bg-card data-[state=active]:text-foreground">
+                  <Film className="h-3.5 w-3.5" />
+                  Videos
+                </TabsTrigger>
+                <TabsTrigger value="scene" className="gap-1.5 data-[state=active]:bg-card data-[state=active]:text-foreground">
+                  <Map className="h-3.5 w-3.5" />
+                  Site Scene
+                </TabsTrigger>
+              </TabsList>
             </div>
-          </TabsContent>
-        </Tabs>
+
+            <TabsContent value="videos" className="flex flex-1 flex-col overflow-hidden pb-4">
+              <VideoLibrary />
+            </TabsContent>
+
+            <TabsContent value="scene" className="flex flex-1 flex-col overflow-hidden">
+              <div className="relative flex flex-1 flex-col overflow-hidden px-4 pb-4 md:px-6 md:pb-6">
+                <div className="relative flex-1">
+                  <SceneViewer
+                    hotspots={hotspots}
+                    activeHotspot={activeHotspot}
+                    onHotspotClick={handleHotspotClick}
+                    highlightedHotspots={highlightedHotspots}
+                  />
+                  <LoadingOverlay isVisible={isLoading} query={loadingQuery} />
+                </div>
+              </div>
+            </TabsContent>
+          </Tabs>
+        )}
       </div>
     </div>
   )

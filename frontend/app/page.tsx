@@ -24,28 +24,56 @@ export default function SplattPage() {
   const [activeTab, setActiveTab] = useState("videos")
 
   const handleSearch = useCallback(async (query: string) => {
+    console.log('SCENE_QUERY_INITIATED:', { query, timestamp: new Date().toISOString() })
+
     setIsLoading(true)
     setLoadingQuery(query)
     setNoResults(false)
     setShowResults(false)
     setActiveHotspot(null)
 
+    const startTime = performance.now()
+
     try {
       const formData = new FormData()
       formData.append("query", query)
+      console.log('SCENE_QUERY_SENDING:', { url: 'http://localhost:8000/api/query', method: 'POST', query })
 
       const res = await fetch("http://localhost:8000/api/query", {
         method: "POST",
         body: formData,
       })
 
-      if (!res.ok) throw new Error("Query failed")
+      const endTime = performance.now()
+      console.log('SCENE_QUERY_RESPONSE_RECEIVED:', {
+        status: res.status,
+        statusText: res.statusText,
+        responseTime: `${(endTime - startTime).toFixed(2)}ms`
+      })
+
+      if (!res.ok) {
+        const errorText = await res.text().catch(() => 'Unable to read error response')
+        console.error('SCENE_QUERY_ERROR:', { status: res.status, statusText: res.statusText, errorText })
+        throw new Error("Query failed")
+      }
 
       const data = await res.json()
+      console.log('SCENE_QUERY_DATA_PARSED:', {
+        hasHotspots: !!data.hotspots,
+        hotspotsCount: data.hotspots?.length || 0,
+        hasAnalysis: !!data.analysis,
+        analysisLength: data.analysis?.length || 0,
+        confidence: data.confidence,
+        location: data.location,
+        coordinates: data.coordinates,
+        worker: data.worker,
+        workerRole: data.workerRole
+      })
 
       setIsLoading(false)
 
       if (data.hotspots && data.hotspots.length > 0) {
+        console.log('SCENE_QUERY_HOTSPOTS_FOUND:', { hotspots: data.hotspots, firstMatch: data.hotspots[0] })
         setHighlightedHotspots(data.hotspots)
         const firstMatch = data.hotspots[0]
         setActiveHotspot(firstMatch)
@@ -66,9 +94,11 @@ export default function SplattPage() {
 
         setShowResults(true)
         setActiveTab("scene")
+        console.log('SCENE_QUERY_UI_UPDATED:', { activeTab: 'scene', showResults: true })
       } else {
         // Fallback for analysis with no specific hotspots
         if (data.analysis) {
+          console.log('SCENE_QUERY_NO_HOTSPOTS_BUT_HAS_ANALYSIS:', { analysisPreview: data.analysis.substring(0, 100) })
           setHighlightedHotspots([])
           setCurrentResult({
             id: "gemini",
@@ -84,13 +114,25 @@ export default function SplattPage() {
           })
           setShowResults(true)
           setActiveTab("scene")
+          console.log('SCENE_QUERY_UI_UPDATED:', { activeTab: 'scene', showResults: true, mode: 'scene-wide' })
         } else {
+          console.warn('SCENE_QUERY_NO_RESULTS:', { data })
           setHighlightedHotspots([])
           setNoResults(true)
         }
       }
+
+      console.log('SCENE_QUERY_COMPLETED:', {
+        totalTime: `${(performance.now() - startTime).toFixed(2)}ms`,
+        success: true
+      })
     } catch (err) {
-      console.error(err)
+      const endTime = performance.now()
+      console.error('SCENE_QUERY_FAILED:', {
+        error: err,
+        message: err instanceof Error ? err.message : 'Unknown error',
+        totalTime: `${(endTime - startTime).toFixed(2)}ms`
+      })
       setIsLoading(false)
       setNoResults(true)
     }

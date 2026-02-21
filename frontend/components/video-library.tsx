@@ -45,7 +45,29 @@ function formatDate(iso: string): string {
   return d.toLocaleDateString("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })
 }
 
-const fetcher = (url: string) => fetch(url).then((r) => r.json())
+const fetcher = (url: string) => {
+  console.log('VIDEO_GROUPS_FETCH_INITIATED:', { url, timestamp: new Date().toISOString() })
+  return fetch(url)
+    .then((r) => {
+      console.log('VIDEO_GROUPS_FETCH_RESPONSE:', { status: r.status, statusText: r.statusText })
+      if (!r.ok) {
+        console.error('VIDEO_GROUPS_FETCH_ERROR:', { status: r.status, statusText: r.statusText })
+      }
+      return r.json()
+    })
+    .then((data) => {
+      console.log('VIDEO_GROUPS_FETCH_SUCCESS:', {
+        groupCount: data?.groups?.length || 0,
+        totalVideos: data?.groups?.reduce((sum: number, g: any) => sum + (g.videoCount || 0), 0) || 0,
+        groups: data?.groups?.map((g: any) => ({ id: g.id, name: g.name, videoCount: g.videoCount })) || []
+      })
+      return data
+    })
+    .catch((err) => {
+      console.error('VIDEO_GROUPS_FETCH_FAILED:', { error: err, message: err.message })
+      throw err
+    })
+}
 
 function VideoCard({ video }: { video: VideoGroup["videos"][number] }) {
   return (
@@ -209,6 +231,13 @@ export function VideoLibrary() {
   const uploadFile = useCallback(
     async (file: File) => {
       const uploadId = `upload-${Date.now()}-${Math.random().toString(36).slice(2)}`
+      console.log('VIDEO_UPLOAD_INITIATED:', {
+        uploadId,
+        filename: file.name,
+        fileSize: file.size,
+        fileType: file.type,
+        timestamp: new Date().toISOString()
+      })
 
       const newUpload: UploadProgress = {
         id: uploadId,
@@ -223,21 +252,56 @@ export function VideoLibrary() {
       for (let p = 10; p <= 70; p += 15) {
         await new Promise((r) => setTimeout(r, 300))
         setUploads((prev) => prev.map((u) => (u.id === uploadId ? { ...u, progress: p } : u)))
+        console.log('VIDEO_UPLOAD_PROGRESS:', { uploadId, progress: p, status: 'uploading' })
       }
 
       setUploads((prev) =>
         prev.map((u) => (u.id === uploadId ? { ...u, progress: 80, status: "processing" } : u))
       )
+      console.log('VIDEO_UPLOAD_PROCESSING:', { uploadId, progress: 80, status: 'processing' })
+
+      const startTime = performance.now()
 
       try {
         const formData = new FormData()
         formData.append("video", file)
 
+        console.log('VIDEO_UPLOAD_SENDING:', {
+          uploadId,
+          url: 'http://localhost:8000/api/videos/groups',
+          method: 'POST',
+          filename: file.name
+        })
+
         const res = await fetch("http://localhost:8000/api/videos/groups", { method: "POST", body: formData })
 
-        if (!res.ok) throw new Error("Upload failed")
+        const endTime = performance.now()
+        console.log('VIDEO_UPLOAD_RESPONSE_RECEIVED:', {
+          uploadId,
+          status: res.status,
+          statusText: res.statusText,
+          responseTime: `${(endTime - startTime).toFixed(2)}ms`
+        })
+
+        if (!res.ok) {
+          const errorText = await res.text().catch(() => 'Unable to read error response')
+          console.error('VIDEO_UPLOAD_ERROR:', {
+            uploadId,
+            status: res.status,
+            statusText: res.statusText,
+            errorText
+          })
+          throw new Error("Upload failed")
+        }
 
         const result = await res.json()
+        console.log('VIDEO_UPLOAD_RESULT_PARSED:', {
+          uploadId,
+          groupId: result.group?.id,
+          groupName: result.group?.name,
+          videoId: result.video?.id,
+          message: result.message
+        })
 
         setUploads((prev) =>
           prev.map((u) => (u.id === uploadId ? { ...u, progress: 100, status: "complete" } : u))
@@ -245,12 +309,27 @@ export function VideoLibrary() {
 
         // Expand the group this video was assigned to
         if (result.group?.id) {
+          console.log('VIDEO_UPLOAD_EXPANDING_GROUP:', { groupId: result.group.id })
           setExpandedGroups((prev) => new Set(prev).add(result.group.id))
         }
 
         // Refresh the groups list
+        console.log('VIDEO_UPLOAD_REFRESHING_GROUPS:', { uploadId })
         mutate()
-      } catch {
+
+        console.log('VIDEO_UPLOAD_COMPLETED:', {
+          uploadId,
+          totalTime: `${(performance.now() - startTime).toFixed(2)}ms`,
+          success: true
+        })
+      } catch (err) {
+        const endTime = performance.now()
+        console.error('VIDEO_UPLOAD_FAILED:', {
+          uploadId,
+          error: err,
+          message: err instanceof Error ? err.message : 'Unknown error',
+          totalTime: `${(endTime - startTime).toFixed(2)}ms`
+        })
         setUploads((prev) =>
           prev.map((u) =>
             u.id === uploadId ? { ...u, progress: 0, status: "error", error: "Upload failed. Try again." } : u

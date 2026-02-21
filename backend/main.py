@@ -1,30 +1,25 @@
 import logging
-import io
 import os
 import cv2
 import tempfile
 import uuid
-import base64
 from typing import List, Optional, Dict
 from datetime import datetime
 
-import google.generativeai as genai
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, UploadFile, HTTPException, Form
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from PIL import Image
 
+from llm_service import get_gemini_service
+from models import SceneQueryResponse
+
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 load_dotenv()
-
-# Configure Gemini
-api_key = os.getenv("GOOGLE_API_KEY")
-genai.configure(api_key=api_key)
-model = genai.GenerativeModel('gemini-3-flash-preview')
 
 app = FastAPI(title="Splatt VLM Backend")
 
@@ -95,25 +90,13 @@ async def upload_video(video: UploadFile = File(...)):
             tmp_path = tmp.name
 
         logger.info(f"Extracting keyframes from: {tmp_path}")
-        # Extract context
         keyframes = extract_keyframes(tmp_path)
         logger.info(f"Extracted {len(keyframes)} keyframes.")
-        
-        # Analyze scene context with Gemini
-        analysis_prompt = """
-        This is a sequence of frames from a construction site 'helmet cam'. 
-        Analyze the scene and describe:
-        1. Major objects/materials (e.g. lumber, concrete)
-        2. Equipment present
-        3. Activities being performed
-        4. Spatial relationships
-        
-        Format as a concise summary for a 3D scene index.
-        """
-        
+
+        # Analyze scene with Gemini via LangChain
         logger.info("Sending keyframes to Gemini for analysis...")
-        response = model.generate_content([analysis_prompt] + keyframes)
-        scene_summary = response.text
+        gemini = get_gemini_service()
+        scene_summary = gemini.analyze_construction_scene(keyframes)
         logger.info("Analysis complete.")
 
         # Clean up temp file
@@ -165,38 +148,24 @@ async def query_scene(query: str = Form(...), group_id: Optional[str] = Form(Non
     
     # Use all scene context if no group specified
     context = "\n".join(state.scenes.values())
-    
-    prompt = f"""
-    Based on the following construction site scene analysis:
-    {context}
-    
-    User Query: {query}
-    
-    Respond in JSON format with:
-    1. 'analysis': A detailed natural language answer.
-    2. 'location': Specific site location if mentioned (e.g. "South wall").
-    3. 'coordinates': Mock coordinates if possible (e.g. "X:10, Y:20").
-    4. 'confidence': 'High', 'Medium', or 'Low'.
-    5. 'hotspots': A list of matching hotspot IDs (h1, h2, h3, h4, h5, h6) if applicable.
-    6. 'worker': The name of a worker if seen or inferred.
-    7. 'workerRole': Their role.
-    """
-    
+
     try:
-        # Use generation_config to encourage JSON if supported, or just parse
-        response = model.generate_content(
-            prompt,
-            generation_config={"response_mime_type": "application/json"}
-        )
-        import json
-        return JSONResponse(content=json.loads(response.text))
+        gemini = get_gemini_service()
+        response: SceneQueryResponse = gemini.query_scene(query, context)
+
+        # Convert Pydantic model to dict for JSON response
+        return JSONResponse(content=response.model_dump())
     except Exception as e:
-        print(f"Query Error: {e}")
-        # Fallback if Gemini fails to produce valid JSON
+        logger.error(f"Query error: {e}")
+        # Fallback with all required fields
         return JSONResponse(content={
-            "analysis": f"Gemini Analysis: {response.text}",
-            "confidence": "Medium",
-            "hotspots": []
+            "analysis": f"Error processing query: {str(e)}",
+            "confidence": "Low",
+            "hotspots": [],
+            "location": None,
+            "coordinates": None,
+            "worker": None,
+            "workerRole": None
         })
 
 if __name__ == "__main__":

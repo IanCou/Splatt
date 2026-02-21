@@ -1,7 +1,14 @@
 fastapi
 uvicorn
 python-multipart
-google-generativeai
+google-genai
 python-dotenv
-pillow
 opencv-python-headless
+Pillow
+chromadb
+pydantic
+sqlalchemy
+supabase
+paramiko
+supabase
+boto3

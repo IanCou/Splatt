@@ -21,7 +21,16 @@ export default function SplattPage() {
   const [isLoading, setIsLoading] = useState(false)
   const [loadingQuery, setLoadingQuery] = useState("")
   const [noResults, setNoResults] = useState(false)
-  const [activeTab, setActiveTab] = useState("videos")
+  const [activeTab, setActiveTab] = useState("scene") // FIX #1: Start with scene tab active
+
+  console.log('PAGE_STATE:', {
+    activeTab,
+    hotspotsAvailable: hotspots.length,
+    activeHotspot,
+    highlightedHotspotsCount: highlightedHotspots.length,
+    showResults,
+    isLoading
+  })
 
   const handleSearch = useCallback(async (query: string) => {
     console.log('SCENE_QUERY_INITIATED:', { query, timestamp: new Date().toISOString() })
@@ -185,7 +194,10 @@ export default function SplattPage() {
 
       {/* Tabs to switch between videos and scene */}
       <div className="flex flex-1 flex-col overflow-hidden">
-        <Tabs value={activeTab} onValueChange={setActiveTab} className="flex flex-1 flex-col overflow-hidden">
+        <Tabs value={activeTab} onValueChange={(value) => {
+          console.log('TAB_CHANGED:', { from: activeTab, to: value })
+          setActiveTab(value)
+        }} className="flex flex-1 flex-col overflow-hidden">
           <div className="px-4 pb-3 md:px-6">
             <TabsList className="bg-secondary">
               <TabsTrigger value="videos" className="gap-1.5 data-[state=active]:bg-card data-[state=active]:text-foreground">
@@ -205,7 +217,17 @@ export default function SplattPage() {
 
           <TabsContent value="scene" className="flex flex-1 flex-col overflow-hidden">
             <div className="relative flex flex-1 flex-col overflow-hidden px-4 pb-4 md:flex-row md:px-6 md:pb-6">
-              <div className="relative flex-1">
+              <div className="relative flex flex-1 flex-col">
+                {/* FIX #2: Added 'flex flex-col' to make this a flex container so child flex-1 works */}
+                {(() => {
+                  console.log('RENDERING_SCENE_VIEWER:', {
+                    hotspotsCount: hotspots.length,
+                    hotspotIds: hotspots.map(h => h.id),
+                    activeHotspot,
+                    highlightedHotspots
+                  })
+                  return null
+                })()}
                 <SceneViewer
                   hotspots={hotspots}
                   activeHotspot={activeHotspot}

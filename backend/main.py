@@ -105,6 +105,12 @@ async def upload_video(video: UploadFile = File(...)):
 
         # Mock ML grouping logic
         group_id = f"g{len(state.groups) + 1}"
+        print(f"\n{'='*80}")
+        print(f"[BACKEND] Creating new group: {group_id}")
+        print(f"[BACKEND] Scene summary length: {len(scene_summary)} characters")
+        print(f"[BACKEND] Scene summary preview: {scene_summary[:200]}...")
+        print(f"{'='*80}\n")
+
         new_group = {
             "id": group_id,
             "name": f"Project: {video.filename.split('.')[0]}",
@@ -114,7 +120,7 @@ async def upload_video(video: UploadFile = File(...)):
             "totalDuration": 0, # Mock
             "videos": []
         }
-        
+
         video_id = str(uuid.uuid4())
         new_video = {
             "id": video_id,
@@ -126,10 +132,15 @@ async def upload_video(video: UploadFile = File(...)):
             "status": "ready",
             "groupId": group_id
         }
-        
+
         new_group["videos"].append(new_video)
         state.groups.append(new_group)
         state.scenes[group_id] = scene_summary
+
+        print(f"[BACKEND] Stored scene data in state.scenes['{group_id}']")
+        print(f"[BACKEND] Total groups in state: {len(state.groups)}")
+        print(f"[BACKEND] Total scenes in state: {len(state.scenes)}")
+        print(f"[BACKEND] Scene keys: {list(state.scenes.keys())}")
 
         return {
             "video": new_video,
@@ -143,20 +154,46 @@ async def upload_video(video: UploadFile = File(...)):
 
 @app.post("/api/query")
 async def query_scene(query: str = Form(...), group_id: Optional[str] = Form(None)):
+    print(f"\n{'='*80}")
+    print(f"[BACKEND] Query endpoint called")
+    print(f"[BACKEND] Query: {query}")
+    print(f"[BACKEND] Group ID: {group_id}")
+    print(f"[BACKEND] Total scenes available: {len(state.scenes)}")
+    print(f"[BACKEND] Scene keys: {list(state.scenes.keys())}")
+    print(f"{'='*80}\n")
+
     if not state.scenes:
+        print("[BACKEND] ERROR: No scenes in state!")
         return {"error": "No scenes processed yet. Please upload a video first."}
-    
+
     # Use all scene context if no group specified
     context = "\n".join(state.scenes.values())
+    print(f"[BACKEND] Combined context length: {len(context)} characters")
+    print(f"[BACKEND] Context preview: {context[:300]}...")
 
     try:
         gemini = get_gemini_service()
+        print(f"[BACKEND] Sending query to Gemini...")
         response: SceneQueryResponse = gemini.query_scene(query, context)
 
+        print(f"\n[BACKEND] Gemini response received:")
+        print(f"  - Analysis: {response.analysis[:100]}...")
+        print(f"  - Confidence: {response.confidence}")
+        print(f"  - Hotspots: {response.hotspots}")
+        print(f"  - Location: {response.location}")
+        print(f"  - Coordinates: {response.coordinates}")
+        print(f"  - Worker: {response.worker}")
+        print(f"  - Worker Role: {response.workerRole}")
+
         # Convert Pydantic model to dict for JSON response
-        return JSONResponse(content=response.model_dump())
+        result = response.model_dump()
+        print(f"[BACKEND] Returning response with {len(result.get('hotspots', []))} hotspots")
+        return JSONResponse(content=result)
     except Exception as e:
         logger.error(f"Query error: {e}")
+        print(f"[BACKEND] ERROR during query: {e}")
+        import traceback
+        print(f"[BACKEND] Traceback:\n{traceback.format_exc()}")
         # Fallback with all required fields
         return JSONResponse(content={
             "analysis": f"Error processing query: {str(e)}",

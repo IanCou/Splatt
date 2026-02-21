@@ -115,8 +115,11 @@ class GeminiService:
         message = HumanMessage(content=message_content)
 
         # Invoke LLM
+        print(f"[GEMINI] Sending {len(keyframes)} keyframes to Gemini for analysis...")
         response = self.llm.invoke([message])
 
+        print(f"[GEMINI] Analysis complete. Response length: {len(response.content)} characters")
+        print(f"[GEMINI] Response preview: {response.content[:300]}...")
         logger.info("Scene analysis complete")
         return response.content
 
@@ -135,6 +138,9 @@ class GeminiService:
             SceneQueryResponse with validated structured data
         """
         logger.info(f"Processing query: {user_query[:50]}...")
+        print(f"\n[GEMINI] Query scene called")
+        print(f"[GEMINI] User query: {user_query}")
+        print(f"[GEMINI] Scene context length: {len(scene_context)} characters")
 
         prompt = f"""
         Based on the following construction site scene analysis:
@@ -152,8 +158,18 @@ class GeminiService:
         7. 'workerRole': Their role.
         """
 
+        print(f"[GEMINI] Sending structured query to Gemini...")
         # Use structured output - automatically validates against Pydantic model
         response: SceneQueryResponse = self.structured_llm.invoke(prompt)
+
+        print(f"[GEMINI] Structured response received:")
+        print(f"  - Analysis: {response.analysis[:100] if response.analysis else 'None'}...")
+        print(f"  - Confidence: {response.confidence}")
+        print(f"  - Hotspots: {response.hotspots}")
+        print(f"  - Location: {response.location}")
+        print(f"  - Coordinates: {response.coordinates}")
+        print(f"  - Worker: {response.worker}")
+        print(f"  - Worker Role: {response.workerRole}")
 
         logger.info(f"Query complete with confidence: {response.confidence}")
         return response

@@ -174,6 +174,16 @@ def videos_to_gsplat(video_configs, pt_file_dir):
     torch.save(model.state_dict(), pt_file_dir)
     return model
 
+def make_config(video_path, start, end):
+    return         {
+        "path": video_path,
+        "start_time": start,
+        "end_time": end,
+        "intrinsics": torch.eye(3), #MUST BE 3
+        "extrinsics": torch.eye(4) #MUST BE 4
+        }
+
+
 if __name__ == "__main__":
     configs = [
         {

@@ -71,16 +71,50 @@ function HotspotDot({
 
 export function SceneViewer({ hotspots, activeHotspot, onHotspotClick, highlightedHotspots }: SceneViewerProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
+  console.log("Viewer constructed");
+  // Log hotspot data when component receives props
+  useEffect(() => {
+    console.log('SCENE_VIEWER_PROPS_UPDATED:', {
+      hotspotsCount: hotspots.length,
+      hotspots: hotspots.map(h => ({ id: h.id, label: h.label, x: h.x, y: h.y, type: h.type })),
+      activeHotspot,
+      highlightedHotspotsCount: highlightedHotspots.length,
+      highlightedHotspots
+    })
+  }, [hotspots, activeHotspot, highlightedHotspots])
 
   useEffect(() => {
+    console.log('CANVAS_EFFECT_RUNNING')
     const canvas = canvasRef.current
-    if (!canvas) return
+    if (!canvas) {
+      console.log('CANVAS_ERROR: Canvas ref is null')
+      return
+    }
+    console.log('CANVAS_REF_FOUND:', canvas)
+
     const ctx = canvas.getContext("2d")
-    if (!ctx) return
+    if (!ctx) {
+      console.log('CANVAS_ERROR: Could not get 2d context')
+      return
+    }
+    console.log('CANVAS_CONTEXT_OBTAINED')
 
     const draw = () => {
       const dpr = window.devicePixelRatio || 1
       const rect = canvas.getBoundingClientRect()
+      console.log('CANVAS_DRAW_CALLED:', {
+        dpr,
+        rectWidth: rect.width,
+        rectHeight: rect.height,
+        canvasWidth: canvas.width,
+        canvasHeight: canvas.height
+      })
+
+      if (rect.width === 0 || rect.height === 0) {
+        console.log('CANVAS_ERROR: Canvas has zero dimensions!', rect)
+        return
+      }
+
       canvas.width = rect.width * dpr
       canvas.height = rect.height * dpr
       ctx.scale(dpr, dpr)
@@ -88,6 +122,7 @@ export function SceneViewer({ hotspots, activeHotspot, onHotspotClick, highlight
       // Background
       ctx.fillStyle = "#000000"
       ctx.fillRect(0, 0, rect.width, rect.height)
+      console.log('CANVAS_BACKGROUND_DRAWN')
 
       // Grid
       const gridSize = 60
@@ -139,28 +174,90 @@ export function SceneViewer({ hotspots, activeHotspot, onHotspotClick, highlight
       ctx.setLineDash([])
     }
 
+    console.log('CANVAS_CALLING_INITIAL_DRAW')
     draw()
 
-    const observer = new ResizeObserver(draw)
+    console.log('CANVAS_SETTING_UP_RESIZE_OBSERVER')
+    const observer = new ResizeObserver(() => {
+      console.log('CANVAS_RESIZE_OBSERVED')
+      draw()
+    })
     observer.observe(canvas)
-    return () => observer.disconnect()
+    return () => {
+      console.log('CANVAS_CLEANUP: Disconnecting observer')
+      observer.disconnect()
+    }
+  }, [])
+
+  console.log("HOTSPOTS: ");
+  console.log(hotspots);
+
+  const containerRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    if (containerRef.current) {
+      const rect = containerRef.current.getBoundingClientRect()
+      const computedStyle = window.getComputedStyle(containerRef.current)
+      console.log('SCENE_VIEWER_CONTAINER_DIMENSIONS:', {
+        width: rect.width,
+        height: rect.height,
+        display: computedStyle.display,
+        flexGrow: computedStyle.flexGrow,
+        flexShrink: computedStyle.flexShrink,
+        flexBasis: computedStyle.flexBasis,
+        minHeight: computedStyle.minHeight,
+        maxHeight: computedStyle.maxHeight
+      })
+
+      // Check parent chain
+      let element = containerRef.current.parentElement
+      let level = 1
+      while (element && level <= 5) {
+        const parentRect = element.getBoundingClientRect()
+        const parentStyle = window.getComputedStyle(element)
+        console.log(`PARENT_${level}:`, {
+          tagName: element.tagName,
+          className: element.className,
+          width: parentRect.width,
+          height: parentRect.height,
+          display: parentStyle.display,
+          flexDirection: parentStyle.flexDirection,
+          flexGrow: parentStyle.flexGrow,
+          overflow: parentStyle.overflow
+        })
+        element = element.parentElement
+        level++
+      }
+    }
   }, [])
 
   return (
-    <div className="relative flex-1 overflow-hidden rounded-xl border border-border bg-card">
+    <div ref={containerRef} className="relative flex-1 overflow-hidden rounded-xl border border-border bg-card">
       <canvas ref={canvasRef} className="absolute inset-0 h-full w-full" />
 
       {/* Hotspots */}
       <div className="absolute inset-0">
-        {hotspots.map((spot) => (
-          <HotspotDot
-            key={spot.id}
-            spot={spot}
-            isActive={activeHotspot === spot.id}
-            isHighlighted={highlightedHotspots.includes(spot.id)}
-            onClick={() => onHotspotClick(spot.id)}
-          />
-        ))}
+        {hotspots.map((spot) => {
+          console.log('SCENE_VIEWER_RENDERING_HOTSPOT:', {
+            id: spot.id,
+            label: spot.label,
+            isActive: activeHotspot === spot.id,
+            isHighlighted: highlightedHotspots.includes(spot.id),
+            position: { x: spot.x, y: spot.y }
+          })
+          return (
+            <HotspotDot
+              key={spot.id}
+              spot={spot}
+              isActive={activeHotspot === spot.id}
+              isHighlighted={highlightedHotspots.includes(spot.id)}
+              onClick={() => {
+                console.log('SCENE_VIEWER_HOTSPOT_CLICKED:', { id: spot.id, label: spot.label })
+                onHotspotClick(spot.id)
+              }}
+            />
+          )
+        })}
       </div>
 
       {/* Overlay labels */}

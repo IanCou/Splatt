@@ -2,6 +2,7 @@
 .env
 .env.*
 !.env.example
+/.idea
 
 # Python
 venv/
@@ -22,3 +23,7 @@ yarn-error.log*
 # OS
 .DS_Store
 Thumbs.db
+backend-server.log
+claude.md
+frontend-server.log
+/backend/results

@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useCallback } from "react"
+import { useState, useCallback, useEffect } from "react"
 import { ProjectBar } from "@/components/project-bar"
 import { QueryBar } from "@/components/query-bar"
 import { SceneViewer } from "@/components/scene-viewer"
@@ -9,8 +9,10 @@ import { LoadingOverlay } from "@/components/loading-overlay"
 import { VideoLibrary } from "@/components/video-library"
 import { Badge } from "@/components/ui/badge"
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs"
-import { AlertCircle, Map, Film } from "lucide-react"
+import { AlertCircle, Map as MapIcon, Film } from "lucide-react"
 import { hotspots, queryResults } from "@/lib/mock-data"
+import type { VideoDescriptor } from "@/lib/types"
+import useSWR from "swr"
 
 export default function SplattPage() {
   const [selectedProject, setSelectedProject] = useState("p1")
@@ -21,66 +23,277 @@ export default function SplattPage() {
   const [isLoading, setIsLoading] = useState(false)
   const [loadingQuery, setLoadingQuery] = useState("")
   const [noResults, setNoResults] = useState(false)
-  const [activeTab, setActiveTab] = useState("videos")
+  const [activeTab, setActiveTab] = useState("scene") // FIX #1: Start with scene tab active
 
-  const simulateSearch = useCallback((query: string) => {
+  // Store video descriptors: Map<video_id, VideoDescriptor>
+  const [videoDescriptors, setVideoDescriptors] = useState<Map<string, VideoDescriptor>>(new Map())
+
+  // Fetch groups and extract descriptors
+  const { data: groupsData } = useSWR<{ groups: any[] }>(
+    "http://localhost:8000/api/videos/groups",
+    (url) => fetch(url).then((r) => r.json())
+  )
+
+  // Extract and store descriptors when groups data changes
+  useEffect(() => {
+    if (groupsData?.groups) {
+      const descriptors = new Map<string, VideoDescriptor>()
+      let totalDescriptors = 0
+
+      for (const group of groupsData.groups) {
+        for (const video of group.videos || []) {
+          if (video.descriptor) {
+            descriptors.set(video.id, video.descriptor)
+            totalDescriptors++
+          }
+        }
+      }
+
+      setVideoDescriptors(descriptors)
+      console.log('VIDEO_DESCRIPTORS_LOADED:', {
+        totalDescriptors,
+        videoIds: Array.from(descriptors.keys()),
+        sampleDescriptor: totalDescriptors > 0 ? descriptors.values().next().value : null
+      })
+    }
+  }, [groupsData])
+
+  console.log('PAGE_STATE:', {
+    activeTab,
+    hotspotsAvailable: hotspots.length,
+    activeHotspot,
+    highlightedHotspotsCount: highlightedHotspots.length,
+    showResults,
+    isLoading
+  })
+
+  const handleSearch = useCallback(async (query: string) => {
+    console.log('SCENE_QUERY_INITIATED:', {
+      query,
+      timestamp: new Date().toISOString(),
+      descriptorsInState: videoDescriptors.size
+    })
+
     setIsLoading(true)
     setLoadingQuery(query)
     setNoResults(false)
     setShowResults(false)
     setActiveHotspot(null)
 
-    const lowerQuery = query.toLowerCase()
+    const startTime = performance.now()
 
-    setTimeout(() => {
-      const matches: string[] = []
+    try {
+      // Gather relevant descriptors (all descriptors, per Option B - send all for current group/all if no group)
+      const descriptorsArray = Array.from(videoDescriptors.values())
+      console.log('SCENE_QUERY_DESCRIPTORS:', {
+        descriptorCount: descriptorsArray.length,
+        videoIds: Array.from(videoDescriptors.keys()),
+        hasDescriptors: descriptorsArray.length > 0
+      })
 
-      if (lowerQuery.includes("lumber") || lowerQuery.includes("wood") || lowerQuery.includes("2x4")) {
-        matches.push("h1")
-      }
-      if (lowerQuery.includes("concrete") || lowerQuery.includes("mixer") || lowerQuery.includes("pour")) {
-        matches.push("h2")
-      }
-      if (
-        lowerQuery.includes("south wall") ||
-        lowerQuery.includes("crew") ||
-        lowerQuery.includes("framing") ||
-        lowerQuery.includes("working")
-      ) {
-        matches.push("h3")
-      }
-      if (lowerQuery.includes("rebar") || lowerQuery.includes("delivery") || lowerQuery.includes("deliver")) {
-        matches.push("h4")
-      }
-      if (lowerQuery.includes("scaffold")) {
-        matches.push("h5")
-      }
-      if (lowerQuery.includes("tool") || lowerQuery.includes("storage") || lowerQuery.includes("circular saw")) {
-        matches.push("h6")
-      }
-      if (lowerQuery.includes("yesterday") || lowerQuery.includes("last")) {
-        matches.push("h5", "h1")
-      }
-      if (lowerQuery.includes("morning") || lowerQuery.includes("today")) {
-        matches.push("h4", "h2")
+      // Warn if no descriptors available
+      if (descriptorsArray.length === 0) {
+        console.warn('SCENE_QUERY_NO_DESCRIPTORS:', {
+          message: 'No video descriptors found in state - query will use basic context only',
+          videoDescriptorsSize: videoDescriptors.size
+        })
       }
 
-      const uniqueMatches = [...new Set(matches)]
+      // Build request body
+      const requestBody = {
+        query,
+        group_id: null, // Could be set if we add group filtering UI
+        descriptors: descriptorsArray
+      }
+
+      console.log('SCENE_QUERY_SENDING:', {
+        url: 'http://localhost:8000/api/query',
+        method: 'POST',
+        query,
+        descriptorCount: descriptorsArray.length
+      })
+
+      // Log full request payload for debugging
+      console.log('SCENE_QUERY_REQUEST_BODY:', {
+        query: requestBody.query,
+        group_id: requestBody.group_id,
+        descriptors_count: requestBody.descriptors?.length || 0,
+        descriptors_sample: requestBody.descriptors?.[0] ? {
+          video_id: requestBody.descriptors[0].video_id,
+          filename: requestBody.descriptors[0].filename,
+          scene_type: requestBody.descriptors[0].scene_type,
+          people_count: requestBody.descriptors[0].people?.length || 0,
+          zones_count: requestBody.descriptors[0].spatial_zones?.length || 0,
+          snapshots_count: requestBody.descriptors[0].frame_snapshots?.length || 0
+        } : null
+      })
+
+      // Check if descriptors can be stringified (JSON serialization test)
+      try {
+        const testJson = JSON.stringify(requestBody)
+        console.log('SCENE_QUERY_JSON_SIZE:', {
+          bytes: testJson.length,
+          kilobytes: (testJson.length / 1024).toFixed(2) + 'KB'
+        })
+      } catch (jsonErr) {
+        console.error('SCENE_QUERY_JSON_SERIALIZATION_ERROR:', jsonErr)
+      }
+
+      const res = await fetch("http://localhost:8000/api/query", {
+        method: "POST",
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(requestBody),
+      })
+
+      const endTime = performance.now()
+      console.log('SCENE_QUERY_RESPONSE_RECEIVED:', {
+        status: res.status,
+        statusText: res.statusText,
+        responseTime: `${(endTime - startTime).toFixed(2)}ms`
+      })
+
+      if (!res.ok) {
+        // Try to parse error as JSON first (FastAPI returns JSON errors)
+        let errorDetails: any = null
+        let errorText = ''
+
+        try {
+          const errorBody = await res.text()
+          errorText = errorBody
+
+          // Try parsing as JSON
+          try {
+            errorDetails = JSON.parse(errorBody)
+            console.error('SCENE_QUERY_ERROR_JSON:', {
+              status: res.status,
+              statusText: res.statusText,
+              errorDetails,
+              detail: errorDetails.detail // FastAPI puts error details here
+            })
+          } catch {
+            // Not JSON, just log as text
+            console.error('SCENE_QUERY_ERROR_TEXT:', {
+              status: res.status,
+              statusText: res.statusText,
+              errorText: errorText.substring(0, 500) // First 500 chars
+            })
+          }
+        } catch (readErr) {
+          console.error('SCENE_QUERY_ERROR_UNABLE_TO_READ:', {
+            status: res.status,
+            statusText: res.statusText,
+            readError: readErr
+          })
+        }
+
+        // Log what we were trying to send when error occurred
+        console.error('SCENE_QUERY_ERROR_CONTEXT:', {
+          query,
+          descriptorsSent: descriptorsArray.length,
+          requestBodyKeys: Object.keys(requestBody)
+        })
+
+        throw new Error(`Query failed: ${res.status} ${res.statusText}`)
+      }
+
+      const data = await res.json()
+      console.log('SCENE_QUERY_DATA_PARSED:', {
+        hasHotspots: !!data.hotspots,
+        hotspotsCount: data.hotspots?.length || 0,
+        hasAnalysis: !!data.analysis,
+        analysisLength: data.analysis?.length || 0,
+        confidence: data.confidence,
+        location: data.location,
+        coordinates: data.coordinates,
+        worker: data.worker,
+        workerRole: data.workerRole
+      })
 
       setIsLoading(false)
 
-      if (uniqueMatches.length > 0) {
-        setHighlightedHotspots(uniqueMatches)
-        const firstMatch = uniqueMatches[0]
+      if (data.hotspots && data.hotspots.length > 0) {
+        console.log('SCENE_QUERY_HOTSPOTS_FOUND:', { hotspots: data.hotspots, firstMatch: data.hotspots[0] })
+        setHighlightedHotspots(data.hotspots)
+        const firstMatch = data.hotspots[0]
         setActiveHotspot(firstMatch)
-        setCurrentResult(queryResults[firstMatch] || null)
+
+        // Map Gemini response to QueryResult format
+        setCurrentResult({
+          id: firstMatch,
+          location: data.location || "Unknown Location",
+          coordinates: data.coordinates || "N/A",
+          timestamp: new Date().toLocaleString(),
+          worker: data.worker || "System",
+          workerRole: data.workerRole || "Assistant",
+          description: data.analysis,
+          confidence: data.confidence || "Medium",
+          thumbnails: [],
+          relatedQueries: []
+        })
+
         setShowResults(true)
+        setActiveTab("scene")
+        console.log('SCENE_QUERY_UI_UPDATED:', { activeTab: 'scene', showResults: true })
       } else {
-        setHighlightedHotspots([])
-        setNoResults(true)
+        // Fallback for analysis with no specific hotspots
+        if (data.analysis) {
+          console.log('SCENE_QUERY_NO_HOTSPOTS_BUT_HAS_ANALYSIS:', { analysisPreview: data.analysis.substring(0, 100) })
+          setHighlightedHotspots([])
+          setCurrentResult({
+            id: "gemini",
+            location: "Scene Wide",
+            coordinates: "N/A",
+            timestamp: new Date().toLocaleString(),
+            worker: "Gemini",
+            workerRole: "AI Analyst",
+            description: data.analysis,
+            confidence: data.confidence || "High",
+            thumbnails: [],
+            relatedQueries: ["Show overview", "What else is here?"]
+          })
+          setShowResults(true)
+          setActiveTab("scene")
+          console.log('SCENE_QUERY_UI_UPDATED:', { activeTab: 'scene', showResults: true, mode: 'scene-wide' })
+        } else {
+          console.warn('SCENE_QUERY_NO_RESULTS:', { data })
+          setHighlightedHotspots([])
+          setNoResults(true)
+        }
       }
-    }, 1800)
-  }, [])
+
+      console.log('SCENE_QUERY_COMPLETED:', {
+        totalTime: `${(performance.now() - startTime).toFixed(2)}ms`,
+        success: true
+      })
+    } catch (err) {
+      const endTime = performance.now()
+      console.error('SCENE_QUERY_FAILED:', {
+        error: err,
+        message: err instanceof Error ? err.message : 'Unknown error',
+        stack: err instanceof Error ? err.stack : undefined,
+        totalTime: `${(endTime - startTime).toFixed(2)}ms`,
+        query,
+        descriptorCount: descriptorsArray.length
+      })
+
+      // Additional debugging: check if it's a network error vs backend error
+      if (err instanceof TypeError) {
+        console.error('SCENE_QUERY_NETWORK_ERROR:', {
+          message: 'Possible network/CORS issue or backend not running',
+          error: err.message
+        })
+      } else if (err instanceof Error && err.message.includes('Query failed')) {
+        console.error('SCENE_QUERY_BACKEND_ERROR:', {
+          message: 'Backend returned an error - check logs above for details'
+        })
+      }
+
+      setIsLoading(false)
+      setNoResults(true)
+    }
+  }, [videoDescriptors])
 
   const handleHotspotClick = useCallback((id: string) => {
     setActiveHotspot(id)
@@ -97,9 +310,9 @@ export default function SplattPage() {
 
   const handleRelatedQuery = useCallback(
     (query: string) => {
-      simulateSearch(query)
+      handleSearch(query)
     },
-    [simulateSearch]
+    [handleSearch]
   )
 
   return (
@@ -107,7 +320,7 @@ export default function SplattPage() {
       <ProjectBar selectedProject={selectedProject} onProjectChange={setSelectedProject} />
 
       <main className="flex flex-1 flex-col overflow-hidden max-w-[1400px] mx-auto w-full">
-        <QueryBar onSubmit={simulateSearch} isLoading={isLoading} />
+        <QueryBar onSubmit={handleSearch} isLoading={isLoading} />
 
         {/* No results state */}
         {noResults && !showResults && (
@@ -153,7 +366,7 @@ export default function SplattPage() {
                       Videos
                     </TabsTrigger>
                     <TabsTrigger value="scene" className="h-7 gap-2 px-4 text-[13px] font-medium transition-all data-[state=active]:bg-white data-[state=active]:text-black">
-                      <Map className="h-3.5 w-3.5" />
+                      <MapIcon className="h-3.5 w-3.5" />
                       Scene
                     </TabsTrigger>
                   </TabsList>

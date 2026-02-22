@@ -11,7 +11,7 @@ interface ProjectBarProps {
 }
 
 export function ProjectBar({ selectedProject, onProjectChange }: ProjectBarProps) {
-  const project = projects.find((p) => p.id === selectedProject) ?? projects[0]
+  const project = projects.find(p => p.id === selectedProject)
 
   return (
     <header className="flex flex-col gap-4 border-b border-white/10 bg-black px-6 py-4 md:flex-row md:items-center md:justify-between">
@@ -46,12 +46,12 @@ export function ProjectBar({ selectedProject, onProjectChange }: ProjectBarProps
         <div className="flex items-center gap-4">
           <div className="flex items-center gap-2 group cursor-default">
             <Video className="h-3.5 w-3.5 group-hover:text-blue-500 transition-colors" />
-            <span className="text-white group-hover:text-white transition-colors">{project.footage} Cam Feeds</span>
+            <span className="text-white group-hover:text-white transition-colors">{project?.footage ?? 0} Cam Feeds</span>
           </div>
           <div className="w-1 h-1 rounded-full bg-white/20" />
           <div className="flex items-center gap-2 group cursor-default">
             <Clock className="h-3.5 w-3.5 group-hover:text-amber-500 transition-colors" />
-            <span className="text-white group-hover:text-white transition-colors">{project.hours}H Total</span>
+            <span className="text-white group-hover:text-white transition-colors">{project?.hours ?? 0}H Total</span>
           </div>
         </div>
 

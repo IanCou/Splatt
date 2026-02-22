@@ -171,3 +171,11 @@ export const projects = [
   { id: "p2", name: "Oakwood Mall Renovation", footage: 18, hours: 4.8 },
   { id: "p3", name: "Highway 101 Bridge Repair", footage: 31, hours: 8.1 },
 ]
+
+// Debug logging - placed after all declarations
+console.log('MOCK_DATA_LOADED:', {
+  hotspotsCount: hotspots.length,
+  hotspots: hotspots.map(h => ({ id: h.id, label: h.label })),
+  queryResultsCount: Object.keys(queryResults).length,
+  projectsCount: projects.length
+})

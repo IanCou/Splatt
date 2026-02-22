@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useRef, useCallback } from "react"
+import { useState, useRef, useCallback, useEffect } from "react"
 import useSWR from "swr"
 import { Card } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
@@ -45,26 +45,36 @@ function formatDate(iso: string): string {
   return d.toLocaleDateString("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })
 }
 
-const fetcher = (url: string) => fetch(url).then((r) => r.json())
+const fetcher = (url: string) => {
+  console.log('VIDEO_GROUPS_FETCH_INITIATED:', { url, timestamp: new Date().toISOString() })
+  return fetch(url)
+    .then((r) => {
+      console.log('VIDEO_GROUPS_FETCH_RESPONSE:', { status: r.status, statusText: r.statusText })
+      if (!r.ok) {
+        console.error('VIDEO_GROUPS_FETCH_ERROR:', { status: r.status, statusText: r.statusText })
+      }
+      return r.json()
+    })
+    .then((data) => {
+      console.log('VIDEO_GROUPS_FETCH_SUCCESS:', {
+        groupCount: data?.groups?.length || 0,
+        totalVideos: data?.groups?.reduce((sum: number, g: any) => sum + (g.videoCount || 0), 0) || 0,
+        groups: data?.groups?.map((g: any) => ({ id: g.id, name: g.name, videoCount: g.videoCount })) || []
+      })
+      return data
+    })
+    .catch((err) => {
+      console.error('VIDEO_GROUPS_FETCH_FAILED:', { error: err, message: err.message })
+      throw err
+    })
+}
 
 function VideoCard({ video }: { video: VideoGroup["videos"][number] }) {
   return (
     <div className="flex items-center gap-3 rounded-lg border border-border bg-background p-3 transition-colors hover:border-primary/30">
-      {/* Thumbnail placeholder */}
-      <div className="flex h-12 w-20 shrink-0 items-center justify-center rounded-md bg-muted">
-        <Film className="h-5 w-5 text-muted-foreground" />
-      </div>
       <div className="min-w-0 flex-1">
         <p className="truncate text-sm font-medium text-foreground">{video.originalName}</p>
         <div className="mt-1 flex items-center gap-3 text-xs text-muted-foreground">
-          <span className="flex items-center gap-1">
-            <Clock className="h-3 w-3" />
-            {formatDuration(video.duration)}
-          </span>
-          <span className="flex items-center gap-1">
-            <HardDrive className="h-3 w-3" />
-            {formatBytes(video.size)}
-          </span>
           <span>{formatDate(video.uploadedAt)}</span>
         </div>
       </div>
@@ -115,10 +125,6 @@ function GroupCard({
               <FileVideo className="h-3 w-3" />
               {group.videoCount} video{group.videoCount !== 1 ? "s" : ""}
             </span>
-            <span className="flex items-center gap-1">
-              <Clock className="h-3 w-3" />
-              {formatDuration(group.totalDuration)}
-            </span>
           </div>
           {isExpanded ? (
             <ChevronDown className="h-4 w-4 text-muted-foreground" />
@@ -135,10 +141,6 @@ function GroupCard({
             <span className="flex items-center gap-1">
               <FileVideo className="h-3 w-3" />
               {group.videoCount} video{group.videoCount !== 1 ? "s" : ""}
-            </span>
-            <span className="flex items-center gap-1">
-              <Clock className="h-3 w-3" />
-              {formatDuration(group.totalDuration)}
             </span>
           </div>
           <div className="flex flex-col gap-2">
@@ -170,11 +172,16 @@ function UploadItem({ upload, onDismiss }: { upload: UploadProgress; onDismiss: 
       <div className="min-w-0 flex-1">
         <p className="truncate text-sm text-foreground">{upload.filename}</p>
         <div className="mt-1.5 flex items-center gap-2">
-          <Progress value={upload.progress} className="h-1.5 flex-1" />
+          <Progress
+            value={upload.progress}
+            className={`h-1.5 flex-1 ${upload.status === "error" ? "bg-destructive/20" : ""}`}
+          />
           <span className="shrink-0 text-xs text-muted-foreground">{upload.progress}%</span>
         </div>
-        {upload.status === "processing" && (
-          <p className="mt-1 text-xs text-muted-foreground">Analyzing and grouping footage...</p>
+        {(upload.status === "processing" || upload.status === "uploading") && (
+          <p className="mt-1 text-xs text-muted-foreground animate-pulse">
+            {upload.backendStatus || (upload.status === "uploading" ? "Uploading..." : "Analyzing and grouping footage...")}
+          </p>
         )}
         {upload.status === "error" && upload.error && (
           <p className="mt-1 text-xs text-destructive">{upload.error}</p>
@@ -191,11 +198,64 @@ function UploadItem({ upload, onDismiss }: { upload: UploadProgress; onDismiss: 
 }
 
 export function VideoLibrary() {
-  const { data, mutate, isLoading } = useSWR<{ groups: VideoGroup[] }>("/api/videos/groups", fetcher)
+  const { data, mutate, isLoading } = useSWR<{ groups: VideoGroup[] }>("http://localhost:8000/api/videos/groups", fetcher)
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set())
   const [uploads, setUploads] = useState<UploadProgress[]>([])
   const [isDragOver, setIsDragOver] = useState(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
+
+  // Poll for background task status
+  useEffect(() => {
+    const processingUploads = uploads.filter(u => u.status === "processing" && u.id.startsWith("task-"))
+
+    if (processingUploads.length === 0) return
+
+    const pollInterval = setInterval(async () => {
+      const updatedUploads = [...uploads]
+      let needsUpdate = false
+
+      for (const upload of processingUploads) {
+        try {
+          // Task ID is stored in the ID but with a prefix
+          const taskId = upload.id.replace("task-", "")
+          const res = await fetch(`/api/tasks/${taskId}`)
+
+          if (!res.ok) continue
+
+          const data = await res.json()
+
+          const index = updatedUploads.findIndex(u => u.id === upload.id)
+          if (index !== -1) {
+            const current = updatedUploads[index]
+
+            // Update if status or progress changed
+            if (current.backendStatus !== data.status || current.progress !== data.progress) {
+              needsUpdate = true
+              updatedUploads[index] = {
+                ...current,
+                backendStatus: data.status,
+                progress: data.progress,
+                status: data.progress === 100 ? "complete" : data.progress === -1 ? "error" : "processing",
+                error: data.progress === -1 ? data.status : undefined
+              }
+
+              if (data.progress === 100) {
+                mutate() // Refresh library when a task finishes
+              }
+            }
+          }
+        } catch (err) {
+          console.error("Polling error for task", upload.id, err)
+        }
+      }
+
+      if (needsUpdate) {
+        setUploads(updatedUploads)
+      }
+    }, 3000)
+
+    return () => clearInterval(pollInterval)
+  }, [uploads, mutate])
 
   const toggleGroup = useCallback((id: string) => {
     setExpandedGroups((prev) => {
@@ -209,6 +269,13 @@ export function VideoLibrary() {
   const uploadFile = useCallback(
     async (file: File) => {
       const uploadId = `upload-${Date.now()}-${Math.random().toString(36).slice(2)}`
+      console.log('VIDEO_UPLOAD_INITIATED:', {
+        uploadId,
+        filename: file.name,
+        fileSize: file.size,
+        fileType: file.type,
+        timestamp: new Date().toISOString()
+      })
 
       const newUpload: UploadProgress = {
         id: uploadId,
@@ -219,41 +286,74 @@ export function VideoLibrary() {
 
       setUploads((prev) => [newUpload, ...prev])
 
-      // Simulate upload progress
-      for (let p = 10; p <= 70; p += 15) {
-        await new Promise((r) => setTimeout(r, 300))
-        setUploads((prev) => prev.map((u) => (u.id === uploadId ? { ...u, progress: p } : u)))
-      }
-
-      setUploads((prev) =>
-        prev.map((u) => (u.id === uploadId ? { ...u, progress: 80, status: "processing" } : u))
-      )
+      // Track the current ID — it changes once backend assigns a task ID
+      let currentId = uploadId
 
       try {
+        // Build FormData and upload directly to the backend via Next.js proxy
         const formData = new FormData()
-        formData.append("video", file)
-
-        const res = await fetch("/api/videos/groups", { method: "POST", body: formData })
-
-        if (!res.ok) throw new Error("Upload failed")
-
-        const result = await res.json()
+        formData.append("file", file)
 
         setUploads((prev) =>
-          prev.map((u) => (u.id === uploadId ? { ...u, progress: 100, status: "complete" } : u))
+          prev.map((u) => (u.id === currentId ? { ...u, progress: 10, backendStatus: "Uploading to server..." } : u))
         )
 
-        // Expand the group this video was assigned to
-        if (result.group?.id) {
-          setExpandedGroups((prev) => new Set(prev).add(result.group.id))
-        }
+        const xhr = new XMLHttpRequest()
 
-        // Refresh the groups list
-        mutate()
-      } catch {
+        const uploadPromise = new Promise<{ task_id: string }>((resolve, reject) => {
+          xhr.upload.addEventListener("progress", (e) => {
+            if (e.lengthComputable) {
+              // Map upload progress to 10-80% range
+              const pct = 10 + Math.round((e.loaded / e.total) * 70)
+              setUploads((prev) =>
+                prev.map((u) => (u.id === currentId ? { ...u, progress: pct } : u))
+              )
+            }
+          })
+
+          xhr.addEventListener("load", () => {
+            if (xhr.status >= 200 && xhr.status < 300) {
+              try {
+                resolve(JSON.parse(xhr.responseText))
+              } catch {
+                reject(new Error("Invalid response from server"))
+              }
+            } else {
+              reject(new Error(`Upload failed (${xhr.status})`))
+            }
+          })
+
+          xhr.addEventListener("error", () => reject(new Error("Network error during upload")))
+          xhr.addEventListener("abort", () => reject(new Error("Upload aborted")))
+
+          xhr.open("POST", "/api/videos/upload")
+          xhr.send(formData)
+        })
+
+        setUploads((prev) =>
+          prev.map((u) => (u.id === currentId ? { ...u, progress: 80, status: "processing", backendStatus: "Processing video..." } : u))
+        )
+
+        const result = await uploadPromise
+
+        // Switch to backend task tracking
+        const backendTaskId = result.task_id
+        setUploads((prev) =>
+          prev.map((u) => (u.id === currentId ? {
+            ...u,
+            id: `task-${backendTaskId}`,
+            progress: 5,
+            status: "processing",
+            backendStatus: "Processing started..."
+          } : u))
+        )
+        currentId = `task-${backendTaskId}`
+
+        // The useEffect polling will take it from here
+      } catch (err: any) {
         setUploads((prev) =>
           prev.map((u) =>
-            u.id === uploadId ? { ...u, progress: 0, status: "error", error: "Upload failed. Try again." } : u
+            u.id === currentId ? { ...u, progress: 0, status: "error", error: err.message || "Upload failed. Try again." } : u
           )
         )
       }

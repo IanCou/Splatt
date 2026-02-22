@@ -8,9 +8,10 @@ from datetime import datetime
 import uuid
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, File, UploadFile, HTTPException
+from fastapi import FastAPI, File, UploadFile, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from PIL import Image
@@ -22,6 +23,7 @@ from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmb
 from langchain_core.messages import HumanMessage
 from langchain_core.documents import Document
 from langchain_community.vectorstores import SupabaseVectorStore
+from app.services.worker_service import run_remote_pipeline
 
 load_dotenv()
 
@@ -163,6 +165,97 @@ async def process_video(file: UploadFile = File(...)):
         if temp_video_path and os.path.exists(temp_video_path):
             os.unlink(temp_video_path)
             logger.debug("Cleaned up temp file | path=%s", temp_video_path)
+
+
+TEMP_DIR = Path("./temp_uploads")
+TEMP_DIR.mkdir(exist_ok=True)
+
+# In-memory store for background task statuses
+# In production, this would be Redis or Supabase
+TASK_STATUSES: Dict[str, Dict] = {}
+
+def update_task_status(task_id: str, status: str, progress: int):
+    """Callback for worker_service to update task state."""
+    TASK_STATUSES[task_id] = {
+        "status": status,
+        "progress": progress,
+        "updated_at": datetime.utcnow().isoformat()
+    }
+    logger.info("Task %s status update: %s (%d%%)", task_id, status, progress)
+
+async def full_pipeline_task(task_id: str, local_path: str, filename: str):
+    """Background task for Gemini analysis and then remote Gaussian Splatting."""
+    try:
+        # 0. Initial Status
+        update_task_status(task_id, "Initializing...", 0)
+
+        # 1. Gemini Analysis (0-9%)
+        update_task_status(task_id, "Analyzing video with Gemini...", 2)
+        logger.info("Starting background frame analysis | task_id=%s", task_id)
+        detections = await analyze_video(local_path, task_id)
+        
+        # Persist metadata and detections to Supabase
+        update_task_status(task_id, "Saving detections to Supabase...", 6)
+        video_metadata = {
+            "id": task_id,
+            "filename": filename,
+            "upload_timestamp": datetime.utcnow().isoformat(),
+            "total_detections": len(detections),
+        }
+        
+        if supabase:
+            supabase.table("videos").insert(video_metadata).execute()
+            if detections:
+                supabase.table("detections").insert(detections).execute()
+                await _store_detection_embeddings(detections, task_id)
+        
+        logger.info("Gemini analysis complete | task_id=%s", task_id)
+        update_task_status(task_id, "Handing off to remote worker...", 9)
+
+        # 2. Remote Splatting (10-100%)
+        # run_remote_pipeline is blocking (SSH) so run in thread pool.
+        # It reports its own progress via the on_progress callback (10 → 100%).
+        # It also cleans up local_path when done.
+        logger.info("Starting remote splatting pipeline | task_id=%s", task_id)
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(
+            None, 
+            lambda: run_remote_pipeline(task_id, local_path, on_progress=update_task_status)
+        )
+        
+    except Exception as e:
+        logger.exception("Background pipeline failed | task_id=%s error=%s", task_id, e)
+        update_task_status(task_id, f"Failed: {str(e)}", -1)
+        if os.path.exists(local_path):
+            os.unlink(local_path)
+
+@app.get("/tasks/{task_id}")
+async def get_task_status(task_id: str):
+    """Check the status of a background task."""
+    if task_id not in TASK_STATUSES:
+        raise HTTPException(status_code=404, detail="Task not found")
+    return TASK_STATUSES[task_id]
+
+@app.post("/process-video")
+async def process_video_pipeline(background_tasks: BackgroundTasks, file: UploadFile = File(...)):
+    if not file.content_type.startswith("video/"):
+        raise HTTPException(status_code=400, detail="File must be a video.")
+
+    task_id = str(uuid.uuid4())
+    local_path = TEMP_DIR / f"{task_id}_{file.filename}"
+    
+    with local_path.open("wb") as buffer:
+        import shutil
+        contents = await file.read()
+        buffer.write(contents)
+    
+    # Run the full pipeline (Gemini + SSH orchestration) in the background
+    background_tasks.add_task(full_pipeline_task, task_id, str(local_path), file.filename)
+    
+    return {
+        "task_id": task_id, 
+        "message": "Processing started. Gemini analysis followed by remote Gaussian Splatting."
+    }
 
 
 @app.post("/process")

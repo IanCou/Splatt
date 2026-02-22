@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useRef, useCallback } from "react"
+import { useState, useRef, useCallback, useEffect } from "react"
 import useSWR from "swr"
 import { Card } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
@@ -150,11 +150,16 @@ function UploadItem({ upload, onDismiss }: { upload: UploadProgress; onDismiss: 
       <div className="min-w-0 flex-1">
         <p className="truncate text-sm text-foreground">{upload.filename}</p>
         <div className="mt-1.5 flex items-center gap-2">
-          <Progress value={upload.progress} className="h-1.5 flex-1" />
+          <Progress
+            value={upload.progress}
+            className={`h-1.5 flex-1 ${upload.status === "error" ? "bg-destructive/20" : ""}`}
+          />
           <span className="shrink-0 text-xs text-muted-foreground">{upload.progress}%</span>
         </div>
-        {upload.status === "processing" && (
-          <p className="mt-1 text-xs text-muted-foreground">Analyzing and grouping footage...</p>
+        {(upload.status === "processing" || upload.status === "uploading") && (
+          <p className="mt-1 text-xs text-muted-foreground animate-pulse">
+            {upload.backendStatus || (upload.status === "uploading" ? "Uploading..." : "Analyzing and grouping footage...")}
+          </p>
         )}
         {upload.status === "error" && upload.error && (
           <p className="mt-1 text-xs text-destructive">{upload.error}</p>
@@ -176,6 +181,59 @@ export function VideoLibrary() {
   const [uploads, setUploads] = useState<UploadProgress[]>([])
   const [isDragOver, setIsDragOver] = useState(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
+
+  // Poll for background task status
+  useEffect(() => {
+    const processingUploads = uploads.filter(u => u.status === "processing" && u.id.startsWith("task-"))
+
+    if (processingUploads.length === 0) return
+
+    const pollInterval = setInterval(async () => {
+      const updatedUploads = [...uploads]
+      let needsUpdate = false
+
+      for (const upload of processingUploads) {
+        try {
+          // Task ID is stored in the ID but with a prefix
+          const taskId = upload.id.replace("task-", "")
+          const res = await fetch(`/api/tasks/${taskId}`)
+
+          if (!res.ok) continue
+
+          const data = await res.json()
+
+          const index = updatedUploads.findIndex(u => u.id === upload.id)
+          if (index !== -1) {
+            const current = updatedUploads[index]
+
+            // Update if status or progress changed
+            if (current.backendStatus !== data.status || current.progress !== data.progress) {
+              needsUpdate = true
+              updatedUploads[index] = {
+                ...current,
+                backendStatus: data.status,
+                progress: data.progress,
+                status: data.progress === 100 ? "complete" : data.progress === -1 ? "error" : "processing",
+                error: data.progress === -1 ? data.status : undefined
+              }
+
+              if (data.progress === 100) {
+                mutate() // Refresh library when a task finishes
+              }
+            }
+          }
+        } catch (err) {
+          console.error("Polling error for task", upload.id, err)
+        }
+      }
+
+      if (needsUpdate) {
+        setUploads(updatedUploads)
+      }
+    }, 3000)
+
+    return () => clearInterval(pollInterval)
+  }, [uploads, mutate])
 
   const toggleGroup = useCallback((id: string) => {
     setExpandedGroups((prev) => {
@@ -219,21 +277,23 @@ export function VideoLibrary() {
 
         const result = await res.json()
 
+        // Switch to backend task tracking
+        const backendTaskId = result.task_id
         setUploads((prev) =>
-          prev.map((u) => (u.id === uploadId ? { ...u, progress: 100, status: "complete" } : u))
+          prev.map((u) => (u.id === uploadId ? {
+            ...u,
+            id: `task-${backendTaskId}`,
+            progress: 5,
+            status: "processing",
+            backendStatus: "Request accepted..."
+          } : u))
         )
 
-        // Expand the group this video was assigned to
-        if (result.group?.id) {
-          setExpandedGroups((prev) => new Set(prev).add(result.group.id))
-        }
-
-        // Refresh the groups list
-        mutate()
-      } catch {
+        // The useEffect will take it from here
+      } catch (err: any) {
         setUploads((prev) =>
           prev.map((u) =>
-            u.id === uploadId ? { ...u, progress: 0, status: "error", error: "Upload failed. Try again." } : u
+            u.id === uploadId ? { ...u, progress: 0, status: "error", error: err.message || "Upload failed. Try again." } : u
           )
         )
       }

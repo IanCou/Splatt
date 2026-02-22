@@ -14,6 +14,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import numpy as np
+import requests
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, UploadFile, HTTPException, BackgroundTasks
@@ -66,6 +67,11 @@ class FrameDetections(BaseModel):
     )
 
 
+class FilebinVideoRequest(BaseModel):
+    filebin_url: str = Field(description="Filebin URL where the video is hosted")
+    filename: str = Field(description="Original filename of the video")
+
+
 # ---------------------------------------------------------------------------
 # LangChain model singletons (initialised once at startup)
 # ---------------------------------------------------------------------------
@@ -105,11 +111,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-transforms_path = os.path.join(
-    os.path.dirname(__file__), "..", "frontend", "public", "transforms.json"
-)
-transforms_data = json.load(open(transforms_path))
 
 # ---------------------------------------------------------------------------
 # Endpoints
@@ -192,17 +193,20 @@ TEMP_DIR.mkdir(exist_ok=True)
 # In production, this would be Redis or Supabase
 TASK_STATUSES: Dict[str, Dict] = {}
 
-def update_task_status(task_id: str, status: str, progress: int):
+def update_task_status(task_id: str, status: str, progress: int, result_files: dict = None):
     """Callback for worker_service to update task state."""
-    TASK_STATUSES[task_id] = {
+    entry = {
         "status": status,
         "progress": progress,
         "updated_at": datetime.utcnow().isoformat()
     }
+    if result_files:
+        entry["result_files"] = result_files
+    TASK_STATUSES[task_id] = entry
     logger.info("Task %s status update: %s (%d%%)", task_id, status, progress)
 
 async def full_pipeline_task(task_id: str, local_path: str, filename: str):
-    """Background task for Gemini analysis and then remote Gaussian Splatting."""
+    """Background task for Gemini analysis and then remote Gaussian Splatting (SFTP upload)."""
     try:
         # 0. Initial Status
         update_task_status(task_id, "Initializing...", 0)
@@ -211,7 +215,7 @@ async def full_pipeline_task(task_id: str, local_path: str, filename: str):
         update_task_status(task_id, "Analyzing video with Gemini...", 2)
         logger.info("Starting background frame analysis | task_id=%s", task_id)
         detections = await analyze_video(local_path, task_id)
-        
+
         # Persist metadata and detections to Supabase
         update_task_status(task_id, "Saving detections to Supabase...", 6)
         video_metadata = {
@@ -220,13 +224,13 @@ async def full_pipeline_task(task_id: str, local_path: str, filename: str):
             "upload_timestamp": datetime.utcnow().isoformat(),
             "total_detections": len(detections),
         }
-        
+
         if supabase:
             supabase.table("videos").insert(video_metadata).execute()
             if detections:
                 supabase.table("detections").insert(detections).execute()
-                await _store_detection_embeddings(detections, task_id)
-        
+        # Embeddings are stored later, after coordinates are backfilled from transforms.json
+
         logger.info("Gemini analysis complete | task_id=%s", task_id)
         update_task_status(task_id, "Handing off to remote worker...", 9)
 
@@ -237,15 +241,121 @@ async def full_pipeline_task(task_id: str, local_path: str, filename: str):
         logger.info("Starting remote splatting pipeline | task_id=%s", task_id)
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(
-            None, 
+            None,
             lambda: run_remote_pipeline(task_id, local_path, on_progress=update_task_status)
         )
-        
+
+        # 3. Backfill coordinates + store embeddings now that transforms.json is available.
+        # run_remote_pipeline downloads the file to ./results/<task_id>/transforms.json on success.
+        transforms_path = Path(f"./results/{task_id}/transforms.json")
+        if transforms_path.exists():
+            logger.info("Loading transforms.json for coordinate backfill | task_id=%s", task_id)
+            with open(transforms_path) as f:
+                task_transforms = json.load(f)
+            filled_detections = await loop.run_in_executor(
+                None,
+                lambda: _backfill_coordinates_sync(task_id, task_transforms)
+            )
+            if filled_detections:
+                await _store_detection_embeddings(filled_detections, task_id)
+        else:
+            logger.warning(
+                "transforms.json not found after pipeline, skipping coordinate backfill and embeddings | task_id=%s path=%s",
+                task_id, transforms_path
+            )
+
     except Exception as e:
         logger.exception("Background pipeline failed | task_id=%s error=%s", task_id, e)
         update_task_status(task_id, f"Failed: {str(e)}", -1)
         if os.path.exists(local_path):
             os.unlink(local_path)
+
+
+async def full_pipeline_task_filebin(task_id: str, filebin_url: str, filename: str):
+    """Background task for Gemini analysis and then remote Gaussian Splatting (Filebin download)."""
+    local_temp_path = None
+    try:
+        # 0. Initial Status
+        update_task_status(task_id, "Initializing...", 0)
+
+        # 1. Download from Filebin for Gemini Analysis (0-5%)
+        update_task_status(task_id, "Downloading video from Filebin for analysis...", 1)
+        logger.info("Downloading from Filebin | url=%s task_id=%s", filebin_url, task_id)
+
+        # Download to temp file for local Gemini analysis
+        local_temp_path = TEMP_DIR / f"{task_id}_temp.mp4"
+        import requests
+        response = requests.get(filebin_url, stream=True, timeout=600)
+        response.raise_for_status()
+
+        with local_temp_path.open("wb") as f:
+            for chunk in response.iter_content(chunk_size=8192):
+                f.write(chunk)
+
+        logger.info("Downloaded from Filebin | path=%s", local_temp_path)
+        update_task_status(task_id, "Video downloaded", 5)
+
+        # 2. Gemini Analysis (5-9%)
+        update_task_status(task_id, "Analyzing video with Gemini...", 6)
+        logger.info("Starting background frame analysis | task_id=%s", task_id)
+        detections = await analyze_video(str(local_temp_path), task_id)
+
+        # Persist metadata and detections to Supabase
+        update_task_status(task_id, "Saving detections to Supabase...", 8)
+        video_metadata = {
+            "id": task_id,
+            "filename": filename,
+            "upload_timestamp": datetime.utcnow().isoformat(),
+            "total_detections": len(detections),
+        }
+
+        if supabase:
+            supabase.table("videos").insert(video_metadata).execute()
+            if detections:
+                supabase.table("detections").insert(detections).execute()
+        # Embeddings are stored later, after coordinates are backfilled from transforms.json
+
+        logger.info("Gemini analysis complete | task_id=%s", task_id)
+
+        # Clean up local temp file (we'll use Filebin URL for remote)
+        if local_temp_path and local_temp_path.exists():
+            local_temp_path.unlink()
+            logger.info("Cleaned up local temp file after analysis")
+
+        update_task_status(task_id, "Handing off to remote worker...", 9)
+
+        # 3. Remote Splatting via Filebin URL (10-100%)
+        # Worker downloads directly from Filebin (much faster than SFTP!)
+        logger.info("Starting remote splatting pipeline with Filebin | task_id=%s", task_id)
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(
+            None,
+            lambda: run_remote_pipeline(task_id, filebin_url=filebin_url, on_progress=update_task_status)
+        )
+
+        # 4. Backfill coordinates + store embeddings now that transforms.json is available.
+        transforms_path = Path(f"./results/{task_id}/transforms.json")
+        if transforms_path.exists():
+            logger.info("Loading transforms.json for coordinate backfill | task_id=%s", task_id)
+            with open(transforms_path) as f:
+                task_transforms = json.load(f)
+            filled_detections = await loop.run_in_executor(
+                None,
+                lambda: _backfill_coordinates_sync(task_id, task_transforms)
+            )
+            if filled_detections:
+                await _store_detection_embeddings(filled_detections, task_id)
+        else:
+            logger.warning(
+                "transforms.json not found after pipeline, skipping coordinate backfill and embeddings | task_id=%s path=%s",
+                task_id, transforms_path
+            )
+
+    except Exception as e:
+        logger.exception("Background pipeline failed | task_id=%s error=%s", task_id, e)
+        update_task_status(task_id, f"Failed: {str(e)}", -1)
+        if local_temp_path and local_temp_path.exists():
+            local_temp_path.unlink()
 
 @app.get("/tasks/{task_id}")
 async def get_task_status(task_id: str):
@@ -254,25 +364,68 @@ async def get_task_status(task_id: str):
         raise HTTPException(status_code=404, detail="Task not found")
     return TASK_STATUSES[task_id]
 
+
+@app.get("/results/{task_id}/{filename}")
+async def get_result_file(task_id: str, filename: str):
+    """Serve a result file (PLY or transforms.json) for a completed task."""
+    from fastapi.responses import FileResponse
+
+    # Only allow known result filenames to prevent path traversal
+    allowed_files = {"baked_splat.ply", "baked_splat_sh.ply", "transforms.json"}
+    if filename not in allowed_files:
+        raise HTTPException(status_code=400, detail="Invalid filename")
+
+    result_path = Path(f"./results/{task_id}/{filename}")
+    if not result_path.exists():
+        raise HTTPException(status_code=404, detail="Result file not found")
+
+    media_type = "application/json" if filename.endswith(".json") else "application/octet-stream"
+    return FileResponse(str(result_path), media_type=media_type, filename=filename)
+
 @app.post("/process-video")
 async def process_video_pipeline(background_tasks: BackgroundTasks, file: UploadFile = File(...)):
+    """Legacy endpoint: Upload video file directly (slower via SFTP)."""
     if not file.content_type.startswith("video/"):
         raise HTTPException(status_code=400, detail="File must be a video.")
 
     task_id = str(uuid.uuid4())
     local_path = TEMP_DIR / f"{task_id}_{file.filename}"
-    
+
     with local_path.open("wb") as buffer:
         import shutil
         contents = await file.read()
         buffer.write(contents)
-    
+
     # Run the full pipeline (Gemini + SSH orchestration) in the background
     background_tasks.add_task(full_pipeline_task, task_id, str(local_path), file.filename)
-    
+
     return {
-        "task_id": task_id, 
+        "task_id": task_id,
         "message": "Processing started. Gemini analysis followed by remote Gaussian Splatting."
+    }
+
+
+@app.post("/process-video-filebin")
+async def process_video_filebin(background_tasks: BackgroundTasks, request: FilebinVideoRequest):
+    """Fast endpoint: Provide Filebin URL for GPU server to download directly."""
+    task_id = str(uuid.uuid4())
+
+    logger.info(
+        "Processing video from Filebin | task_id=%s filebin_url=%s filename=%s",
+        task_id, request.filebin_url, request.filename
+    )
+
+    # Run the full pipeline with Filebin URL (Gemini + SSH orchestration)
+    background_tasks.add_task(
+        full_pipeline_task_filebin,
+        task_id,
+        request.filebin_url,
+        request.filename
+    )
+
+    return {
+        "task_id": task_id,
+        "message": "Processing started. Video will be downloaded from Filebin for analysis and splatting."
     }
 
 
@@ -556,13 +709,15 @@ def calculate_object_position(camera_x: float, camera_y: float, camera_z: float,
 
     return (obj_x, obj_y, obj_z)
 
-def get_coordinates_for_frame(frame: int) -> Dict:
-    """Extract position and rotation from transforms.json for a given frame index.
+def get_coordinates_for_frame(frame: int, transforms_data: Dict) -> Dict:
+    """Extract position and rotation from a transforms.json dict for a given frame index.
 
     Parameters
     ----------
     frame : int
         Frame number (e.g. 20 for ``images/frame_00020.jpg``).
+    transforms_data : dict
+        Parsed contents of the transforms.json produced by the Gaussian Splatting pipeline.
 
     Returns
     -------
@@ -570,8 +725,6 @@ def get_coordinates_for_frame(frame: int) -> Dict:
         ``file_path``, ``position`` (x, y, z) and ``rotation`` (rx, ry, rz in
         degrees) extracted from the frame's 4×4 transform matrix.
     """
-
-
     target_path = f"images/frame_{frame:05d}.jpg"
     f = None
     for entry in transforms_data["frames"]:
@@ -603,6 +756,60 @@ def get_coordinates_for_frame(frame: int) -> Dict:
         "ry": round(math.degrees(pitch), 2),
         "rz": round(math.degrees(yaw), 2),
     }
+
+
+def _backfill_coordinates_sync(task_id: str, transforms_data: Dict) -> List[Dict]:
+    """Fetch all detections for a video from Supabase, update their camera coordinates
+    using transforms.json, and return the fully-populated detection dicts so the caller
+    can hand them straight to _store_detection_embeddings.
+    Called after run_remote_pipeline completes successfully.
+    """
+    if not supabase:
+        logger.warning("Supabase not configured, skipping coordinate backfill | task_id=%s", task_id)
+        return []
+
+    response = (
+        supabase.table("detections")
+        .select("id, video_id, frame_number, object_type, description, seconds, distance_estimate")
+        .eq("video_id", task_id)
+        .execute()
+    )
+    detections = response.data or []
+
+    if not detections:
+        logger.info("No detections to backfill | task_id=%s", task_id)
+        return []
+
+    logger.info("Backfilling coordinates for %d detections | task_id=%s", len(detections), task_id)
+
+    filled: List[Dict] = []
+    for det in detections:
+        coords = get_coordinates_for_frame(det["frame_number"] + 1, transforms_data)
+        supabase.table("detections").update({
+            "x": coords["x"],
+            "y": coords["y"],
+            "z": coords["z"],
+            "rx": coords["rx"],
+            "ry": coords["ry"],
+            "rz": coords["rz"],
+        }).eq("id", det["id"]).execute()
+        filled.append({
+            "video_id": det["video_id"],
+            "object_type": det["object_type"],
+            "description": det["description"],
+            "seconds": det["seconds"],
+            "frame_number": det["frame_number"],
+            "distance_estimate": det["distance_estimate"],
+            "x": coords["x"],
+            "y": coords["y"],
+            "z": coords["z"],
+            "rx": coords["rx"],
+            "ry": coords["ry"],
+            "rz": coords["rz"],
+        })
+
+    logger.info("Coordinate backfill complete | task_id=%s", task_id)
+    return filled
 
 
 if __name__ == "__main__":

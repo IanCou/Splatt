@@ -89,20 +89,17 @@ export async function GET() {
 
 export async function POST(request: Request) {
   try {
-    const formData = await request.formData()
-    const file = formData.get("video") as File | null
+    const { video_url, filename } = await request.json()
 
-    if (!file) {
-      return NextResponse.json({ error: "No video file provided" }, { status: 400 })
+    if (!video_url) {
+      return NextResponse.json({ error: "No video URL provided" }, { status: 400 })
     }
 
-    // Forward the video to the FastAPI backend's background pipeline
-    const backendFormData = new FormData()
-    backendFormData.append("file", file)
-
-    const backendResponse = await fetch(`${BACKEND_URL}/process-video`, {
+    // Forward the URL to the FastAPI backend's Filebin pipeline
+    const backendResponse = await fetch(`${BACKEND_URL}/process-video-filebin`, {
       method: "POST",
-      body: backendFormData,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ filebin_url: video_url, filename: filename || "video.mp4" }),
     })
 
     if (!backendResponse.ok) {
@@ -117,7 +114,7 @@ export async function POST(request: Request) {
       message: result.message,
       video: {
         id: result.task_id,
-        filename: file.name,
+        filename: filename || "video.mp4",
         status: "processing",
       }
     })

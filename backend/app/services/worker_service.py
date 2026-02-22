@@ -9,21 +9,32 @@ logger = logging.getLogger(__name__)
 
 
 
-def run_remote_pipeline(task_id: str, local_video_path: str, on_progress=None):
+def run_remote_pipeline(task_id: str, local_video_path: str = None, filebin_url: str = None, on_progress=None):
     """
     SSH Orchestration Background Task.
 
     1. Connect to the remote worker via SSH (with keepalives for long training).
-    2. Upload the video to the remote machine.
+    2. Either upload the video via SFTP (legacy) OR download from Filebin URL (faster).
     3. Run Nerf4Dgsplat.py (already present on the remote) and stream stdout
        to parse training-iteration progress.
     4. Download result PLY files + transforms.json.
     5. Clean up remote temp files.
+
+    Parameters
+    ----------
+    task_id : str
+        Unique task identifier
+    local_video_path : str, optional
+        Path to local video file (for SFTP upload)
+    filebin_url : str, optional
+        Filebin URL to download video from (faster alternative)
+    on_progress : callable, optional
+        Progress callback function
     """
 
-    def report(status: str, progress: int):
+    def report(status: str, progress: int, result_files: dict = None):
         if on_progress:
-            on_progress(task_id, status, progress)
+            on_progress(task_id, status, progress, result_files=result_files)
 
     # Read config here (after load_dotenv() has run in main.py)
     host = os.getenv("WORKER_HOST", "YOUR_WORKER_IP")
@@ -62,18 +73,42 @@ def run_remote_pipeline(task_id: str, local_video_path: str, on_progress=None):
         sftp = ssh.open_sftp()
         logger.info("SSH connection established.")
 
-        # ── 2. Upload video ───────────────────────────────────────────
-        report("Uploading video to worker...", 15)
-        logger.info("Uploading %s → %s", local_video_path, remote_video_path)
+        # ── 2. Get video to worker (either upload or download from Filebin) ──
+        if filebin_url:
+            # Download from Filebin URL (much faster than SFTP)
+            report("Worker downloading video from Filebin...", 15)
+            logger.info("Remote downloading from %s → %s", filebin_url, remote_video_path)
 
-        file_size = os.path.getsize(local_video_path)
+            download_cmd = f"curl -s -o {remote_video_path} '{filebin_url}'"
+            logger.info("Executing remote download: %s", download_cmd)
 
-        def upload_callback(transferred, total):
-            pct = 15 + int((transferred / total) * 15)  # 15-30 %
-            report(f"Uploading video… {transferred * 100 // total}%", pct)
+            stdin, stdout, stderr = ssh.exec_command(download_cmd, timeout=600)
+            exit_status = stdout.channel.recv_exit_status()
 
-        sftp.put(local_video_path, remote_video_path, callback=upload_callback)
-        logger.info("Video upload complete.")
+            if exit_status != 0:
+                error_msg = stderr.read().decode().strip()
+                logger.error("Remote download failed: %s", error_msg)
+                report(f"Download failed: {error_msg[:100]}", -1)
+                return
+
+            logger.info("Remote download complete.")
+            report("Video downloaded on worker", 30)
+
+        elif local_video_path:
+            # Legacy: Upload via SFTP (slower)
+            report("Uploading video to worker...", 15)
+            logger.info("Uploading %s → %s", local_video_path, remote_video_path)
+
+            file_size = os.path.getsize(local_video_path)
+
+            def upload_callback(transferred, total):
+                pct = 15 + int((transferred / total) * 15)  # 15-30 %
+                report(f"Uploading video… {transferred * 100 // total}%", pct)
+
+            sftp.put(local_video_path, remote_video_path, callback=upload_callback)
+            logger.info("Video upload complete.")
+        else:
+            raise ValueError("Either local_video_path or filebin_url must be provided")
 
         # ── 3. Run Nerf4Dgsplat.py on the remote ─────────────────────
         #    The script is already deployed at project_dir.
@@ -100,9 +135,16 @@ def run_remote_pipeline(task_id: str, local_video_path: str, on_progress=None):
 
         exit_status = stdout.channel.recv_exit_status()
         if exit_status != 0:
-            error_msg = stderr.read().decode().strip()
-            logger.error("Remote pipeline failed (exit %d): %s", exit_status, error_msg)
-            report(f"Error: {error_msg[:100]}", -1)
+            raw_stderr = stderr.read().decode('utf-8', errors='replace').strip()
+            # Filter out Python warnings (FutureWarning, DeprecationWarning, etc.)
+            # so the actual error message is surfaced instead of noise.
+            error_lines = [
+                ln for ln in raw_stderr.splitlines()
+                if not any(w in ln for w in ('FutureWarning', 'DeprecationWarning', 'UserWarning', 'warnings.warn'))
+            ]
+            error_msg = '\n'.join(error_lines).strip() or raw_stderr
+            logger.error("Remote pipeline failed (exit %d): %s", exit_status, error_msg[:2000])
+            report(f"Error: {error_msg[:500]}", -1)
             return
 
         logger.info("Remote pipeline finished successfully.")
@@ -122,8 +164,8 @@ def run_remote_pipeline(task_id: str, local_video_path: str, on_progress=None):
             try:
                 sftp.get(remote_path, str(local_path))
                 logger.info("Downloaded %s → %s", remote_path, local_path)
-            except FileNotFoundError:
-                logger.warning("Remote file not found (skipping): %s", remote_path)
+            except (FileNotFoundError, IOError, OSError) as e:
+                logger.warning("Remote file not found (skipping): %s — %s", remote_path, e)
                 # Paramiko may have created an empty local file before the error —
                 # remove it so callers don't see a misleading 0-byte file.
                 if local_path.exists() and local_path.stat().st_size == 0:
@@ -134,8 +176,18 @@ def run_remote_pipeline(task_id: str, local_video_path: str, on_progress=None):
         report("Cleaning up remote files…", 95)
         _remote_cleanup(ssh, remote_video_path, remote_output_dir)
 
-        report("Completed successfully", 100)
-        logger.info("Task %s completed successfully.", task_id)
+        # Build result info with paths to downloaded files
+        result_files = {}
+        for label, local_path in [
+            ("transforms", result_dir / "transforms.json"),
+            ("ply_rgb", result_dir / "baked_splat.ply"),
+            ("ply_sh", result_dir / "baked_splat_sh.ply"),
+        ]:
+            if local_path.exists() and local_path.stat().st_size > 0:
+                result_files[label] = str(local_path)
+
+        report("Completed successfully", 100, result_files=result_files)
+        logger.info("Task %s completed successfully. Results: %s", task_id, list(result_files.keys()))
 
     except paramiko.AuthenticationException as e:
         logger.error("SSH authentication failed for %s: %s", task_id, e)
@@ -150,8 +202,8 @@ def run_remote_pipeline(task_id: str, local_video_path: str, on_progress=None):
         if sftp:
             sftp.close()
         ssh.close()
-        # Cleanup local temp file
-        if os.path.exists(local_video_path):
+        # Cleanup local temp file (only if we uploaded via SFTP)
+        if local_video_path and os.path.exists(local_video_path):
             os.remove(local_video_path)
             logger.info("Cleaned up local temp file: %s", local_video_path)
 
@@ -173,7 +225,11 @@ def _stream_training_progress(stdout, report):
     step_re = re.compile(r"[Ss]tep\s+(\d+)[/\s]+(\d+)")
 
     for raw_line in stdout:
-        line = raw_line.strip()
+        # Paramiko yields bytes in Python 3 — decode to str
+        if isinstance(raw_line, bytes):
+            line = raw_line.decode('utf-8', errors='replace').strip()
+        else:
+            line = str(raw_line).strip()
         if not line:
             continue
 

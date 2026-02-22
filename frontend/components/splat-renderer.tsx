@@ -10,6 +10,11 @@ interface SplatRendererProps {
 }
 
 const vertexShader = `
+  precision highp float;
+  uniform mat4 modelViewMatrix;
+  uniform mat4 projectionMatrix;
+  
+  attribute vec3 position;
   attribute vec3 color;
   attribute vec3 scale;
   
@@ -28,11 +33,11 @@ const vertexShader = `
 `;
 
 const fragmentShader = `
+  precision highp float;
   varying vec3 vColor;
 
   void main() {
     // Gaussian falloff logic provided by the user
-    // center is 0.5, 0.5
     float dist = length(gl_PointCoord - vec2(0.5));
     float alpha = exp(-dist * dist * 8.0);
     
@@ -92,13 +97,12 @@ function GaussianPoints({ url }: { url: string }) {
 
     return (
         <points geometry={geometry}>
-            <shaderMaterial
+            <rawShaderMaterial
                 vertexShader={vertexShader}
                 fragmentShader={fragmentShader}
                 transparent={true}
                 depthWrite={false}
                 blending={THREE.NormalBlending}
-                vertexColors={true}
             />
         </points>
     );
@@ -106,10 +110,10 @@ function GaussianPoints({ url }: { url: string }) {
 
 export function SplatRenderer({ url }: SplatRendererProps) {
     return (
-        <div className="w-full h-full bg-slate-950 relative">
+        <div className="w-full h-full bg-gray-300 relative">
             <Canvas dpr={[1, 2]}>
                 <PerspectiveCamera makeDefault position={[0, 0, 5]} fov={45} />
-                <color attach="background" args={['#020617']} />
+                <color attach="background" args={['#d1d5db']} />
                 <ambientLight intensity={0.5} />
                 <GaussianPoints url={url} />
                 <OrbitControls makeDefault />

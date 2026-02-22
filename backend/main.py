@@ -193,13 +193,16 @@ TEMP_DIR.mkdir(exist_ok=True)
 # In production, this would be Redis or Supabase
 TASK_STATUSES: Dict[str, Dict] = {}
 
-def update_task_status(task_id: str, status: str, progress: int):
+def update_task_status(task_id: str, status: str, progress: int, result_files: dict = None):
     """Callback for worker_service to update task state."""
-    TASK_STATUSES[task_id] = {
+    entry = {
         "status": status,
         "progress": progress,
         "updated_at": datetime.utcnow().isoformat()
     }
+    if result_files:
+        entry["result_files"] = result_files
+    TASK_STATUSES[task_id] = entry
     logger.info("Task %s status update: %s (%d%%)", task_id, status, progress)
 
 async def full_pipeline_task(task_id: str, local_path: str, filename: str):
@@ -360,6 +363,24 @@ async def get_task_status(task_id: str):
     if task_id not in TASK_STATUSES:
         raise HTTPException(status_code=404, detail="Task not found")
     return TASK_STATUSES[task_id]
+
+
+@app.get("/results/{task_id}/{filename}")
+async def get_result_file(task_id: str, filename: str):
+    """Serve a result file (PLY or transforms.json) for a completed task."""
+    from fastapi.responses import FileResponse
+
+    # Only allow known result filenames to prevent path traversal
+    allowed_files = {"baked_splat.ply", "baked_splat_sh.ply", "transforms.json"}
+    if filename not in allowed_files:
+        raise HTTPException(status_code=400, detail="Invalid filename")
+
+    result_path = Path(f"./results/{task_id}/{filename}")
+    if not result_path.exists():
+        raise HTTPException(status_code=404, detail="Result file not found")
+
+    media_type = "application/json" if filename.endswith(".json") else "application/octet-stream"
+    return FileResponse(str(result_path), media_type=media_type, filename=filename)
 
 @app.post("/process-video")
 async def process_video_pipeline(background_tasks: BackgroundTasks, file: UploadFile = File(...)):

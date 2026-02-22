@@ -32,9 +32,9 @@ def run_remote_pipeline(task_id: str, local_video_path: str = None, filebin_url:
         Progress callback function
     """
 
-    def report(status: str, progress: int):
+    def report(status: str, progress: int, result_files: dict = None):
         if on_progress:
-            on_progress(task_id, status, progress)
+            on_progress(task_id, status, progress, result_files=result_files)
 
     # Read config here (after load_dotenv() has run in main.py)
     host = os.getenv("WORKER_HOST", "YOUR_WORKER_IP")
@@ -135,9 +135,16 @@ def run_remote_pipeline(task_id: str, local_video_path: str = None, filebin_url:
 
         exit_status = stdout.channel.recv_exit_status()
         if exit_status != 0:
-            error_msg = stderr.read().decode().strip()
-            logger.error("Remote pipeline failed (exit %d): %s", exit_status, error_msg)
-            report(f"Error: {error_msg[:100]}", -1)
+            raw_stderr = stderr.read().decode('utf-8', errors='replace').strip()
+            # Filter out Python warnings (FutureWarning, DeprecationWarning, etc.)
+            # so the actual error message is surfaced instead of noise.
+            error_lines = [
+                ln for ln in raw_stderr.splitlines()
+                if not any(w in ln for w in ('FutureWarning', 'DeprecationWarning', 'UserWarning', 'warnings.warn'))
+            ]
+            error_msg = '\n'.join(error_lines).strip() or raw_stderr
+            logger.error("Remote pipeline failed (exit %d): %s", exit_status, error_msg[:2000])
+            report(f"Error: {error_msg[:500]}", -1)
             return
 
         logger.info("Remote pipeline finished successfully.")
@@ -157,8 +164,8 @@ def run_remote_pipeline(task_id: str, local_video_path: str = None, filebin_url:
             try:
                 sftp.get(remote_path, str(local_path))
                 logger.info("Downloaded %s → %s", remote_path, local_path)
-            except FileNotFoundError:
-                logger.warning("Remote file not found (skipping): %s", remote_path)
+            except (FileNotFoundError, IOError, OSError) as e:
+                logger.warning("Remote file not found (skipping): %s — %s", remote_path, e)
                 # Paramiko may have created an empty local file before the error —
                 # remove it so callers don't see a misleading 0-byte file.
                 if local_path.exists() and local_path.stat().st_size == 0:
@@ -169,8 +176,18 @@ def run_remote_pipeline(task_id: str, local_video_path: str = None, filebin_url:
         report("Cleaning up remote files…", 95)
         _remote_cleanup(ssh, remote_video_path, remote_output_dir)
 
-        report("Completed successfully", 100)
-        logger.info("Task %s completed successfully.", task_id)
+        # Build result info with paths to downloaded files
+        result_files = {}
+        for label, local_path in [
+            ("transforms", result_dir / "transforms.json"),
+            ("ply_rgb", result_dir / "baked_splat.ply"),
+            ("ply_sh", result_dir / "baked_splat_sh.ply"),
+        ]:
+            if local_path.exists() and local_path.stat().st_size > 0:
+                result_files[label] = str(local_path)
+
+        report("Completed successfully", 100, result_files=result_files)
+        logger.info("Task %s completed successfully. Results: %s", task_id, list(result_files.keys()))
 
     except paramiko.AuthenticationException as e:
         logger.error("SSH authentication failed for %s: %s", task_id, e)
@@ -208,7 +225,11 @@ def _stream_training_progress(stdout, report):
     step_re = re.compile(r"[Ss]tep\s+(\d+)[/\s]+(\d+)")
 
     for raw_line in stdout:
-        line = raw_line.strip()
+        # Paramiko yields bytes in Python 3 — decode to str
+        if isinstance(raw_line, bytes):
+            line = raw_line.decode('utf-8', errors='replace').strip()
+        else:
+            line = str(raw_line).strip()
         if not line:
             continue
 

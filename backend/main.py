@@ -14,6 +14,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import numpy as np
+import requests
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, UploadFile, HTTPException, BackgroundTasks
@@ -64,6 +65,11 @@ class FrameDetections(BaseModel):
         default_factory=list,
         description="All construction objects detected in the image",
     )
+
+
+class FilebinVideoRequest(BaseModel):
+    filebin_url: str = Field(description="Filebin URL where the video is hosted")
+    filename: str = Field(description="Original filename of the video")
 
 
 # ---------------------------------------------------------------------------
@@ -202,7 +208,7 @@ def update_task_status(task_id: str, status: str, progress: int):
     logger.info("Task %s status update: %s (%d%%)", task_id, status, progress)
 
 async def full_pipeline_task(task_id: str, local_path: str, filename: str):
-    """Background task for Gemini analysis and then remote Gaussian Splatting."""
+    """Background task for Gemini analysis and then remote Gaussian Splatting (SFTP upload)."""
     try:
         # 0. Initial Status
         update_task_status(task_id, "Initializing...", 0)
@@ -211,7 +217,7 @@ async def full_pipeline_task(task_id: str, local_path: str, filename: str):
         update_task_status(task_id, "Analyzing video with Gemini...", 2)
         logger.info("Starting background frame analysis | task_id=%s", task_id)
         detections = await analyze_video(local_path, task_id)
-        
+
         # Persist metadata and detections to Supabase
         update_task_status(task_id, "Saving detections to Supabase...", 6)
         video_metadata = {
@@ -220,13 +226,13 @@ async def full_pipeline_task(task_id: str, local_path: str, filename: str):
             "upload_timestamp": datetime.utcnow().isoformat(),
             "total_detections": len(detections),
         }
-        
+
         if supabase:
             supabase.table("videos").insert(video_metadata).execute()
             if detections:
                 supabase.table("detections").insert(detections).execute()
                 await _store_detection_embeddings(detections, task_id)
-        
+
         logger.info("Gemini analysis complete | task_id=%s", task_id)
         update_task_status(task_id, "Handing off to remote worker...", 9)
 
@@ -237,15 +243,84 @@ async def full_pipeline_task(task_id: str, local_path: str, filename: str):
         logger.info("Starting remote splatting pipeline | task_id=%s", task_id)
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(
-            None, 
-            lambda: run_remote_pipeline(task_id, local_path, on_progress=update_task_status)
+            None,
+            lambda: run_remote_pipeline(task_id, local_video_path=local_path, on_progress=update_task_status)
         )
-        
+
     except Exception as e:
         logger.exception("Background pipeline failed | task_id=%s error=%s", task_id, e)
         update_task_status(task_id, f"Failed: {str(e)}", -1)
         if os.path.exists(local_path):
             os.unlink(local_path)
+
+
+async def full_pipeline_task_filebin(task_id: str, filebin_url: str, filename: str):
+    """Background task for Gemini analysis and then remote Gaussian Splatting (Filebin download)."""
+    local_temp_path = None
+    try:
+        # 0. Initial Status
+        update_task_status(task_id, "Initializing...", 0)
+
+        # 1. Download from Filebin for Gemini Analysis (0-5%)
+        update_task_status(task_id, "Downloading video from Filebin for analysis...", 1)
+        logger.info("Downloading from Filebin | url=%s task_id=%s", filebin_url, task_id)
+
+        # Download to temp file for local Gemini analysis
+        local_temp_path = TEMP_DIR / f"{task_id}_temp.mp4"
+        import requests
+        response = requests.get(filebin_url, stream=True, timeout=600)
+        response.raise_for_status()
+
+        with local_temp_path.open("wb") as f:
+            for chunk in response.iter_content(chunk_size=8192):
+                f.write(chunk)
+
+        logger.info("Downloaded from Filebin | path=%s", local_temp_path)
+        update_task_status(task_id, "Video downloaded", 5)
+
+        # 2. Gemini Analysis (5-9%)
+        update_task_status(task_id, "Analyzing video with Gemini...", 6)
+        logger.info("Starting background frame analysis | task_id=%s", task_id)
+        detections = await analyze_video(str(local_temp_path), task_id)
+
+        # Persist metadata and detections to Supabase
+        update_task_status(task_id, "Saving detections to Supabase...", 8)
+        video_metadata = {
+            "id": task_id,
+            "filename": filename,
+            "upload_timestamp": datetime.utcnow().isoformat(),
+            "total_detections": len(detections),
+        }
+
+        if supabase:
+            supabase.table("videos").insert(video_metadata).execute()
+            if detections:
+                supabase.table("detections").insert(detections).execute()
+                await _store_detection_embeddings(detections, task_id)
+
+        logger.info("Gemini analysis complete | task_id=%s", task_id)
+
+        # Clean up local temp file (we'll use Filebin URL for remote)
+        if local_temp_path and local_temp_path.exists():
+            local_temp_path.unlink()
+            logger.info("Cleaned up local temp file after analysis")
+
+        update_task_status(task_id, "Handing off to remote worker...", 9)
+
+        # 3. Remote Splatting via Filebin URL (10-100%)
+        # Worker downloads directly from Filebin (much faster than SFTP!)
+        logger.info("Starting remote splatting pipeline with Filebin | task_id=%s", task_id)
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(
+            None,
+            lambda: run_remote_pipeline(task_id, filebin_url=filebin_url, on_progress=update_task_status)
+        )
+
+    except Exception as e:
+        logger.exception("Background pipeline failed | task_id=%s error=%s", task_id, e)
+        update_task_status(task_id, f"Failed: {str(e)}", -1)
+        if local_temp_path and local_temp_path.exists():
+            local_temp_path.unlink()
 
 @app.get("/tasks/{task_id}")
 async def get_task_status(task_id: str):
@@ -256,23 +331,48 @@ async def get_task_status(task_id: str):
 
 @app.post("/process-video")
 async def process_video_pipeline(background_tasks: BackgroundTasks, file: UploadFile = File(...)):
+    """Legacy endpoint: Upload video file directly (slower via SFTP)."""
     if not file.content_type.startswith("video/"):
         raise HTTPException(status_code=400, detail="File must be a video.")
 
     task_id = str(uuid.uuid4())
     local_path = TEMP_DIR / f"{task_id}_{file.filename}"
-    
+
     with local_path.open("wb") as buffer:
         import shutil
         contents = await file.read()
         buffer.write(contents)
-    
+
     # Run the full pipeline (Gemini + SSH orchestration) in the background
     background_tasks.add_task(full_pipeline_task, task_id, str(local_path), file.filename)
-    
+
     return {
-        "task_id": task_id, 
+        "task_id": task_id,
         "message": "Processing started. Gemini analysis followed by remote Gaussian Splatting."
+    }
+
+
+@app.post("/process-video-filebin")
+async def process_video_filebin(background_tasks: BackgroundTasks, request: FilebinVideoRequest):
+    """Fast endpoint: Provide Filebin URL for GPU server to download directly."""
+    task_id = str(uuid.uuid4())
+
+    logger.info(
+        "Processing video from Filebin | task_id=%s filebin_url=%s filename=%s",
+        task_id, request.filebin_url, request.filename
+    )
+
+    # Run the full pipeline with Filebin URL (Gemini + SSH orchestration)
+    background_tasks.add_task(
+        full_pipeline_task_filebin,
+        task_id,
+        request.filebin_url,
+        request.filename
+    )
+
+    return {
+        "task_id": task_id,
+        "message": "Processing started. Video will be downloaded from Filebin for analysis and splatting."
     }
 
 

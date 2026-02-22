@@ -48,6 +48,15 @@ class DetectionItem(BaseModel):
         description="Category of the object: equipment, materials, workers, vehicles, or structures"
     )
     description: str = Field(description="Brief description of the detected object")
+    distance_estimate: Optional[float] = Field(
+        default=None,
+        description=(
+            "Estimated distance from camera to the object in meters (as a decimal number). "
+            "Use visual cues like object size, detail visibility, and spatial context. "
+            "For reference: nearby objects (0-10m), moderate distance (10-20m), far objects (20-100m+). "
+            "Provide your best numerical estimate."
+        )
+    )
 
 
 class FrameDetections(BaseModel):
@@ -304,7 +313,16 @@ async def analyze_video(video_path: str, video_id: str) -> List[Dict]:
     MAX_IMAGE_DIMENSION = 1024
     PROMPT = (
         "Analyze this construction site image and identify all construction objects present. "
-        "For each object, provide its category and a brief description. "
+        "For each object, provide:\n"
+        "1. Its category (equipment, materials, workers, vehicles, or structures)\n"
+        "2. A brief description of the object\n"
+        "3. Distance estimate from the camera in meters (as a decimal number):\n"
+        "   - Use object size relative to the frame as a primary cue\n"
+        "   - Consider visible detail level (high detail = closer, low detail = farther)\n"
+        "   - Use spatial context and perspective cues\n"
+        "   - Typical ranges: 0-10m (large/detailed), 10-20m (moderate), 20-100m+ (small/distant)\n"
+        "\n"
+        "Provide your best numerical estimate in meters. "
         "Return an empty list if no construction objects are found."
     )
 
@@ -363,6 +381,7 @@ async def analyze_video(video_path: str, video_id: str) -> List[Dict]:
                     "frame_number": frame_data["frame_number"],
                     "object_type": det.object_type,
                     "description": det.description,
+                    "distance_estimate": det.distance_estimate,
                     "x": coords["x"],
                     "y": coords["y"],
                     "z": coords["z"],
@@ -406,6 +425,7 @@ async def _store_detection_embeddings(detections: List[Dict], video_id: str) -> 
                 "object_type": det["object_type"],
                 "seconds": det["seconds"],
                 "frame_number": det["frame_number"],
+                "distance_estimate": det["distance_estimate"],
                 "x": det["x"],
                 "y": det["y"],
                 "z": det["z"],

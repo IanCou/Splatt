@@ -106,11 +106,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-transforms_path = os.path.join(
-    os.path.dirname(__file__), "..", "frontend", "public", "transforms.json"
-)
-transforms_data = json.load(open(transforms_path))
-
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
@@ -225,8 +220,8 @@ async def full_pipeline_task(task_id: str, local_path: str, filename: str):
             supabase.table("videos").insert(video_metadata).execute()
             if detections:
                 supabase.table("detections").insert(detections).execute()
-                await _store_detection_embeddings(detections, task_id)
-        
+        # Embeddings are stored later, after coordinates are backfilled from transforms.json
+
         logger.info("Gemini analysis complete | task_id=%s", task_id)
         update_task_status(task_id, "Handing off to remote worker...", 9)
 
@@ -237,10 +232,30 @@ async def full_pipeline_task(task_id: str, local_path: str, filename: str):
         logger.info("Starting remote splatting pipeline | task_id=%s", task_id)
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(
-            None, 
+            None,
             lambda: run_remote_pipeline(task_id, local_path, on_progress=update_task_status)
         )
-        
+
+        # 3. Backfill coordinates now that transforms.json is available.
+        # run_remote_pipeline downloads the file to ./results/<task_id>/transforms.json
+        # on success. If the file is absent the pipeline failed; skip silently.
+        transforms_path = Path(f"./results/{task_id}/transforms.json")
+        if transforms_path.exists():
+            logger.info("Loading transforms.json for coordinate backfill | task_id=%s", task_id)
+            with open(transforms_path) as f:
+                task_transforms = json.load(f)
+            filled_detections = await loop.run_in_executor(
+                None,
+                lambda: _backfill_coordinates_sync(task_id, task_transforms)
+            )
+            if filled_detections:
+                await _store_detection_embeddings(filled_detections, task_id)
+        else:
+            logger.warning(
+                "transforms.json not found after pipeline, skipping coordinate backfill and embeddings | task_id=%s path=%s",
+                task_id, transforms_path
+            )
+
     except Exception as e:
         logger.exception("Background pipeline failed | task_id=%s error=%s", task_id, e)
         update_task_status(task_id, f"Failed: {str(e)}", -1)
@@ -371,9 +386,6 @@ async def analyze_video(video_path: str, video_id: str) -> List[Dict]:
 
             result: FrameDetections = structured_llm.invoke([message])
 
-            print("Fetching coordinates for frame %d from transforms.json" % frame_data["frame_number"])
-            coords = get_coordinates_for_frame(frame_data["frame_number"] + 1)
-            print(f"Frame {frame_data['frame_number']} coords: {coords}")
             detections = [
                 {
                     "video_id": video_id,
@@ -382,12 +394,12 @@ async def analyze_video(video_path: str, video_id: str) -> List[Dict]:
                     "object_type": det.object_type,
                     "description": det.description,
                     "distance_estimate": det.distance_estimate,
-                    "x": coords["x"],
-                    "y": coords["y"],
-                    "z": coords["z"],
-                    "rx": coords["rx"],
-                    "ry": coords["ry"],
-                    "rz": coords["rz"],
+                    "x": None,
+                    "y": None,
+                    "z": None,
+                    "rx": None,
+                    "ry": None,
+                    "rz": None,
                 }
                 for det in result.detections
             ]
@@ -460,13 +472,15 @@ def _pil_to_data_url(image: Image.Image) -> str:
     b64 = base64.b64encode(buf.getvalue()).decode()
     return f"data:image/jpeg;base64,{b64}"
 
-def get_coordinates_for_frame(frame: int) -> Dict:
-    """Extract position and rotation from transforms.json for a given frame index.
+def get_coordinates_for_frame(frame: int, transforms_data: Dict) -> Dict:
+    """Extract position and rotation from a transforms.json dict for a given frame index.
 
     Parameters
     ----------
     frame : int
         Frame number (e.g. 20 for ``images/frame_00020.jpg``).
+    transforms_data : dict
+        Parsed contents of the transforms.json produced by the Gaussian Splatting pipeline.
 
     Returns
     -------
@@ -474,8 +488,6 @@ def get_coordinates_for_frame(frame: int) -> Dict:
         ``file_path``, ``position`` (x, y, z) and ``rotation`` (rx, ry, rz in
         degrees) extracted from the frame's 4×4 transform matrix.
     """
-
-
     target_path = f"images/frame_{frame:05d}.jpg"
     f = None
     for entry in transforms_data["frames"]:
@@ -507,6 +519,60 @@ def get_coordinates_for_frame(frame: int) -> Dict:
         "ry": round(math.degrees(pitch), 2),
         "rz": round(math.degrees(yaw), 2),
     }
+
+
+def _backfill_coordinates_sync(task_id: str, transforms_data: Dict) -> List[Dict]:
+    """Fetch all detections for a video from Supabase, update their camera coordinates
+    using transforms.json, and return the fully-populated detection dicts so the caller
+    can hand them straight to _store_detection_embeddings.
+    Called after run_remote_pipeline completes successfully.
+    """
+    if not supabase:
+        logger.warning("Supabase not configured, skipping coordinate backfill | task_id=%s", task_id)
+        return []
+
+    response = (
+        supabase.table("detections")
+        .select("id, video_id, frame_number, object_type, description, seconds, distance_estimate")
+        .eq("video_id", task_id)
+        .execute()
+    )
+    detections = response.data or []
+
+    if not detections:
+        logger.info("No detections to backfill | task_id=%s", task_id)
+        return []
+
+    logger.info("Backfilling coordinates for %d detections | task_id=%s", len(detections), task_id)
+
+    filled: List[Dict] = []
+    for det in detections:
+        coords = get_coordinates_for_frame(det["frame_number"] + 1, transforms_data)
+        supabase.table("detections").update({
+            "x": coords["x"],
+            "y": coords["y"],
+            "z": coords["z"],
+            "rx": coords["rx"],
+            "ry": coords["ry"],
+            "rz": coords["rz"],
+        }).eq("id", det["id"]).execute()
+        filled.append({
+            "video_id": det["video_id"],
+            "object_type": det["object_type"],
+            "description": det["description"],
+            "seconds": det["seconds"],
+            "frame_number": det["frame_number"],
+            "distance_estimate": det["distance_estimate"],
+            "x": coords["x"],
+            "y": coords["y"],
+            "z": coords["z"],
+            "rx": coords["rx"],
+            "ry": coords["ry"],
+            "rz": coords["rz"],
+        })
+
+    logger.info("Coordinate backfill complete | task_id=%s", task_id)
+    return filled
 
 
 if __name__ == "__main__":

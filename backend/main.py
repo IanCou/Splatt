@@ -465,7 +465,7 @@ async def analyze_video(video_path: str, video_id: str) -> List[Dict]:
     SAMPLING_INTERVAL_SECONDS = 10
     MAX_IMAGE_DIMENSION = 1024
     PROMPT = (
-        "Analyze this construction site image and identify all construction objects present. "
+        "Analyze this construction site image and identify all construction objects and furniture present. "
         "For each object, provide:\n"
         "1. Its category (equipment, materials, workers, vehicles, or structures)\n"
         "2. A brief description of the object\n"

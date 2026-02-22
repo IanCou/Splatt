@@ -15,6 +15,8 @@
 #
 # Requirements:
 #   pip install nerfstudio plyfile
+#
+#   For editing: SplatfactoModelConfig
 # =============================================================================
 
 from __future__ import annotations
@@ -53,7 +55,7 @@ from nerfstudio.utils.eval_utils import eval_setup
 def run_gs_reconstruction(
     data_dir: str,
     output_dir: str = "outputs/gs",
-    iterations: int = 10000,
+    iterations: int = 30000,
 ) -> Tuple[Path, SplatfactoModel]:
     """
     Train a Gaussian Splatting model (Splatfacto) on a prepared nerfstudio dataset.
@@ -98,7 +100,7 @@ def run_gs_reconstruction(
             model=SplatfactoModelConfig(
                 # stop_split_at: densification (splitting/cloning Gaussians) is disabled
                 # after this step. Set it high so densification runs for most of training.
-                stop_split_at=min(30000, iterations),
+                stop_split_at=min(10000, iterations),
 
                 # cull_alpha_thresh: Gaussians with opacity (after sigmoid) below this
                 # value are pruned from the scene. 0.05 removes near-invisible splats
@@ -107,8 +109,8 @@ def run_gs_reconstruction(
 
                 # densify_grad_thresh: A Gaussian is split/cloned when its 2D screen-space
                 # gradient magnitude exceeds this threshold. Lower = more densification
-                # (finer detail), but also more memory usage. 0.0003 is the paper default.
-                densify_grad_thresh=0.0003,
+                # (finer detail), but also more memory usage. 0.0004 is the paper default.
+                densify_grad_thresh=0.0004,
 
                 camera_optimizer=CameraOptimizerConfig(mode="SO3xR3"),
                 # SO3xR3: jointly refine rotation (SO3) and translation (R3) for each camera.
@@ -123,6 +125,7 @@ def run_gs_reconstruction(
                 # Start training on images downscaled 2× (2^1), then train the remainder
                 # at full resolution. Using 1 (instead of 2) means fewer low-res steps,
                 # which tends to produce sharper detail in the final splat.
+                max_gauss_ratio= 10
             ),
         ),
         optimizers={
@@ -445,6 +448,7 @@ def prepare_datadir(
         "--data",         str(extracted_path),
         "--output-dir",   str(output_path),
         "--matcher-type", "any",      # "any" = COLMAP's exhaustive+vocab-tree fallback
+        "--matching-method",  "sequential",
         "--sfm-tool",     "colmap",
         "--no-verbose",
         "--no-gpu",       # Run COLMAP feature matching on CPU for portability;
@@ -511,7 +515,7 @@ def videos_to_splat(
     meta_data: list[dict],
     output_dir: str = "./",
     fps: int = 4,
-    iterations: int = 30000,
+    iterations: int = 10000,
 ) -> Tuple[Path, SplatfactoModel]:
     """
     Full end-to-end pipeline: video file(s) → prepared dataset → trained splat model.

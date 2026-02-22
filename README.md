@@ -81,36 +81,6 @@ Example: Forklift + pedestrian proximity, Missing safety equipment, Restricted z
 
 2. Path & Object Maps (From Supabase) - Using stored pose + object data: Camera path reconstruction, Object position overlays, Movement trajectory visualization, Scene interaction mapping
 
-**Architecture Summary**
-                ┌──────────────┐
-                │ Video Upload │
-                └──────┬───────┘
-                       │
-         ┌─────────────┴─────────────┐
-         │                           │
-┌──────────────────┐        ┌─────────────────┐
-│ Gaussian Splat   │        │ Gemini Analysis │
-│(4D Reconstruction)│      │(Object Detection)│
-└─────────┬────────┘        └────────┬────────┘
-          │                          │
-          └──────────┬───────────────┘
-                     │
-        ┌──────────────────────────────┐
-        │ Global Object Position Solver │
-        └──────────────┬───────────────┘
-                       │
-               ┌───────────────┐
-               │   Supabase    │
-               │ (Vectors +    │
-               │  Spatial Data)│
-               └───────┬───────┘
-                       │
-        ┌──────────────┴─────────────┐
-        │                            │
-┌───────────────┐            ┌────────────────┐
-│ LangChain RAG │            │ Visualizations │
-└───────────────┘            └────────────────┘
-
 **Core Capabilities**
 
 ✅ 4D scene reconstruction
@@ -126,3 +96,4 @@ Scene intelligence extraction
 Spatial querying with natural language
 Automated hazard detection
 Advanced post-video spatial analytics
+

@@ -6,6 +6,7 @@ pillow
 supabase
 opencv-python
 moviepy
+numpy
 langchain
 langchain-core
 langchain-google-genai

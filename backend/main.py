@@ -1,13 +1,18 @@
 import base64
 import io
+import json
 import logging
+import math
 import os
+import re
 import tempfile
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Tuple
 from datetime import datetime
 import uuid
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
+
+import numpy as np
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, UploadFile, HTTPException
@@ -90,6 +95,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+transforms_path = os.path.join(
+    os.path.dirname(__file__), "..", "frontend", "public", "transforms.json"
+)
+transforms_data = json.load(open(transforms_path))
 
 # ---------------------------------------------------------------------------
 # Endpoints
@@ -251,6 +260,9 @@ async def analyze_video(video_path: str, video_id: str) -> List[Dict]:
 
             result: FrameDetections = structured_llm.invoke([message])
 
+            print("Fetching coordinates for frame %d from transforms.json" % frame_data["frame_number"])
+            coords = get_coordinates_for_frame(frame_data["frame_number"] + 1)
+            print(f"Frame {frame_data['frame_number']} coords: {coords}")
             detections = [
                 {
                     "video_id": video_id,
@@ -258,6 +270,12 @@ async def analyze_video(video_path: str, video_id: str) -> List[Dict]:
                     "frame_number": frame_data["frame_number"],
                     "object_type": det.object_type,
                     "description": det.description,
+                    "x": coords["x"],
+                    "y": coords["y"],
+                    "z": coords["z"],
+                    "rx": coords["rx"],
+                    "ry": coords["ry"],
+                    "rz": coords["rz"],
                 }
                 for det in result.detections
             ]
@@ -286,6 +304,7 @@ async def _store_detection_embeddings(detections: List[Dict], video_id: str) -> 
     """Embed each detection description and store in Supabase for semantic search."""
     logger.info("Storing %d detection embeddings | video_id=%s", len(detections), video_id)
 
+
     documents = [
         Document(
             page_content=det["description"],
@@ -294,6 +313,12 @@ async def _store_detection_embeddings(detections: List[Dict], video_id: str) -> 
                 "object_type": det["object_type"],
                 "seconds": det["seconds"],
                 "frame_number": det["frame_number"],
+                "x": det["x"],
+                "y": det["y"],
+                "z": det["z"],
+                "rx": det["rx"],
+                "ry": det["ry"],
+                "rz": det["rz"],
             },
         )
         for det in detections
@@ -321,6 +346,54 @@ def _pil_to_data_url(image: Image.Image) -> str:
     image.save(buf, format="JPEG")
     b64 = base64.b64encode(buf.getvalue()).decode()
     return f"data:image/jpeg;base64,{b64}"
+
+def get_coordinates_for_frame(frame: int) -> Dict:
+    """Extract position and rotation from transforms.json for a given frame index.
+
+    Parameters
+    ----------
+    frame : int
+        Frame number (e.g. 20 for ``images/frame_00020.jpg``).
+
+    Returns
+    -------
+    dict
+        ``file_path``, ``position`` (x, y, z) and ``rotation`` (rx, ry, rz in
+        degrees) extracted from the frame's 4×4 transform matrix.
+    """
+
+
+    target_path = f"images/frame_{frame:05d}.jpg"
+    f = None
+    for entry in transforms_data["frames"]:
+        if entry["file_path"] == target_path:
+            f = entry
+            break
+
+    if f is None:
+        return {"x": 0, "y": 0, "z": 0, "rx": 0, "ry": 0, "rz": 0}
+
+    m = np.array(f["transform_matrix"])
+
+    # Position (translation column)
+    x, y, z = float(m[0, 3]), float(m[1, 3]), float(m[2, 3])
+
+    # Rotation (Euler angles from the 3×3 rotation sub-matrix)
+    r = m[:3, :3]
+    sy = math.sqrt(r[0, 0] ** 2 + r[1, 0] ** 2)
+    roll = math.atan2(r[2, 1], r[2, 2])
+    pitch = math.atan2(-r[2, 0], sy)
+    yaw = math.atan2(r[1, 0], r[0, 0])
+
+    return {
+        "file_path": f["file_path"],
+        "x": x,
+        "y": y,
+        "z": z,
+        "rx": round(math.degrees(roll), 2),
+        "ry": round(math.degrees(pitch), 2),
+        "rz": round(math.degrees(yaw), 2),
+    }
 
 
 if __name__ == "__main__":

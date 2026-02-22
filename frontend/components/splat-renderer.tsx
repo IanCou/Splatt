@@ -10,17 +10,17 @@ interface SplatRendererProps {
 }
 
 const vertexShader = `
+  attribute vec3 color;
   attribute vec3 scale;
   
-  varying vec4 vColor;
+  varying vec3 vColor;
 
   void main() {
-    vColor = vec4(color, 1.0);
+    vColor = color;
     vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
     
-    // Compute point size based on average scale and scene scale
+    // Scale the point size based on average scale and distance
     float avgScale = (scale.x + scale.y + scale.z) / 3.0;
-    // We multiply by a scaling factor to make Gaussians visible
     gl_PointSize = avgScale * 1000.0 / length(mvPosition.xyz);
     
     gl_Position = projectionMatrix * mvPosition;
@@ -28,17 +28,18 @@ const vertexShader = `
 `;
 
 const fragmentShader = `
-  varying vec4 vColor;
+  varying vec3 vColor;
 
   void main() {
     // Gaussian falloff logic provided by the user
+    // center is 0.5, 0.5
     float dist = length(gl_PointCoord - vec2(0.5));
     float alpha = exp(-dist * dist * 8.0);
     
-    // Discard low alpha to avoid overlapping square artifacts
-    if (alpha < 0.01) discard;
+    // Discard edges to maintain soft circle shape
+    if (alpha < 0.05) discard;
     
-    gl_FragColor = vec4(vColor.rgb, vColor.a * alpha);
+    gl_FragColor = vec4(vColor, alpha);
   }
 `;
 
@@ -96,7 +97,7 @@ function GaussianPoints({ url }: { url: string }) {
                 fragmentShader={fragmentShader}
                 transparent={true}
                 depthWrite={false}
-                blending={THREE.AdditiveBlending}
+                blending={THREE.NormalBlending}
                 vertexColors={true}
             />
         </points>

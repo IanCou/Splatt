@@ -22,3 +22,6 @@ yarn-error.log*
 # OS
 .DS_Store
 Thumbs.db
+backend-server.log
+claude.md
+frontend-server.log

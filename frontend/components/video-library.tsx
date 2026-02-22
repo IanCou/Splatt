@@ -45,7 +45,29 @@ function formatDate(iso: string): string {
   return d.toLocaleDateString("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })
 }
 
-const fetcher = (url: string) => fetch(url).then((r) => r.json())
+const fetcher = (url: string) => {
+  console.log('VIDEO_GROUPS_FETCH_INITIATED:', { url, timestamp: new Date().toISOString() })
+  return fetch(url)
+    .then((r) => {
+      console.log('VIDEO_GROUPS_FETCH_RESPONSE:', { status: r.status, statusText: r.statusText })
+      if (!r.ok) {
+        console.error('VIDEO_GROUPS_FETCH_ERROR:', { status: r.status, statusText: r.statusText })
+      }
+      return r.json()
+    })
+    .then((data) => {
+      console.log('VIDEO_GROUPS_FETCH_SUCCESS:', {
+        groupCount: data?.groups?.length || 0,
+        totalVideos: data?.groups?.reduce((sum: number, g: any) => sum + (g.videoCount || 0), 0) || 0,
+        groups: data?.groups?.map((g: any) => ({ id: g.id, name: g.name, videoCount: g.videoCount })) || []
+      })
+      return data
+    })
+    .catch((err) => {
+      console.error('VIDEO_GROUPS_FETCH_FAILED:', { error: err, message: err.message })
+      throw err
+    })
+}
 
 function VideoCard({ video }: { video: VideoGroup["videos"][number] }) {
   return (
@@ -176,7 +198,7 @@ function UploadItem({ upload, onDismiss }: { upload: UploadProgress; onDismiss: 
 }
 
 export function VideoLibrary() {
-  const { data, mutate, isLoading } = useSWR<{ groups: VideoGroup[] }>("/api/videos/groups", fetcher)
+  const { data, mutate, isLoading } = useSWR<{ groups: VideoGroup[] }>("http://localhost:8000/api/videos/groups", fetcher)
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set())
   const [uploads, setUploads] = useState<UploadProgress[]>([])
   const [isDragOver, setIsDragOver] = useState(false)
@@ -247,6 +269,13 @@ export function VideoLibrary() {
   const uploadFile = useCallback(
     async (file: File) => {
       const uploadId = `upload-${Date.now()}-${Math.random().toString(36).slice(2)}`
+      console.log('VIDEO_UPLOAD_INITIATED:', {
+        uploadId,
+        filename: file.name,
+        fileSize: file.size,
+        fileType: file.type,
+        timestamp: new Date().toISOString()
+      })
 
       const newUpload: UploadProgress = {
         id: uploadId,

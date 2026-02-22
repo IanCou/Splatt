@@ -1,0 +1,20 @@
+# GPU Server Requirements
+# ============================================================================
+# FastAPI and web server dependencies
+fastapi==0.109.0
+uvicorn[standard]==0.27.0
+python-multipart==0.0.6
+pydantic==2.5.3
+
+# HTTP client for downloading videos from Filebin
+requests==2.31.0
+
+# Environment variables
+python-dotenv==1.0.0
+
+# Note: nerfstudio and its dependencies should already be installed
+# in your conda/miniforge environment. If not, install with:
+#
+#   pip install nerfstudio plyfile
+#
+# This file only includes the NEW dependencies needed for the API server.

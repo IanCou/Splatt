@@ -71,8 +71,8 @@ def run_gs_reconstruction(
         output_dir: Root directory where checkpoints and config.yml are saved.
                     Subdirectories (e.g. splatfacto/<timestamp>/) are auto-created
                     by nerfstudio.
-        iterations: Total training steps. 10 000 is a good quality/speed trade-off;
-                    use 30 000 for maximum quality on complex scenes.
+        iterations: Total training steps. 30 000 is the recommended default for
+                    production quality. Use 10 000 for quick previews only.
 
     Returns:
         Tuple of:
@@ -83,10 +83,9 @@ def run_gs_reconstruction(
     config = TrainerConfig(
         method_name="splatfacto",
         max_num_iterations=iterations,
-        steps_per_save=1000,            # Save a checkpoint every 1 000 steps so you can
-                                        # resume or re-export at any intermediate quality.
-        steps_per_eval_image=500,       # Log an eval render to tensorboard every 500 steps.
-        steps_per_eval_batch=500,
+        steps_per_save=2000,            # Save a checkpoint every 2 000 steps for resume/re-export.
+        steps_per_eval_image=1000,      # Log an eval render to tensorboard every 1 000 steps.
+        steps_per_eval_batch=1000,
         pipeline=VanillaPipelineConfig(
             datamanager=FullImageDatamanagerConfig(
                 dataparser=NerfstudioDataParserConfig(
@@ -98,73 +97,100 @@ def run_gs_reconstruction(
                 cache_images_type="uint8", # I/O bottleneck. uint8 halves VRAM vs float32.
             ),
             model=SplatfactoModelConfig(
-                # stop_split_at: densification (splitting/cloning Gaussians) is disabled
-                # after this step. Set it high so densification runs for most of training.
-                stop_split_at=min(10000, iterations),
+                # stop_split_at: Allow densification (splitting/cloning) to run for 80% of
+                # training. This gives the model much more time to fill in fine detail —
+                # the original 10K cap was too aggressive for complex scenes.
+                stop_split_at=max(int(iterations * 0.8), 15000),
 
                 # cull_alpha_thresh: Gaussians with opacity (after sigmoid) below this
-                # value are pruned from the scene. 0.05 removes near-invisible splats
-                # without aggressively culling legitimate thin/transparent surfaces.
-                cull_alpha_thresh=0.05,
+                # value are pruned. 0.1 is more aggressive than the old 0.05 — it removes
+                # semi-transparent noise splats that contribute to haze/fog artifacts.
+                cull_alpha_thresh=0.1,
 
-                # densify_grad_thresh: A Gaussian is split/cloned when its 2D screen-space
-                # gradient magnitude exceeds this threshold. Lower = more densification
-                # (finer detail), but also more memory usage. 0.0004 is the paper default.
-                densify_grad_thresh=0.0004,
+                # densify_grad_thresh: Split/clone when 2D screen-space gradient exceeds
+                # this threshold. 0.0002 (the original 3DGS paper value) produces ~2×
+                # more densification than 0.0004, yielding finer geometric detail.
+                densify_grad_thresh=0.0002,
+
+                # use_scale_regularization: Penalises Gaussians whose longest axis is
+                # much larger than their shortest (high anisotropy ratio). This prevents
+                # the thin, stretched floater artifacts that are hard to cull geometrically.
+                use_scale_regularization=True,
+                max_gauss_ratio=5.0,
+                # max_gauss_ratio: Maximum allowed ratio between the longest and shortest
+                # scale axes. 5.0 (down from 10) more aggressively penalises elongated
+                # splats that appear as needle/disc artifacts.
 
                 camera_optimizer=CameraOptimizerConfig(mode="SO3xR3"),
                 # SO3xR3: jointly refine rotation (SO3) and translation (R3) for each camera.
                 # This corrects imperfect COLMAP poses during training.
 
-                sh_degree=2,
-                # Degree 2 spherical harmonics: captures view-dependent color effects
-                # (reflections, specularities) with 9 coefficients per channel.
-                # Degree 3 adds more fidelity but costs ~2× VRAM.
+                sh_degree=3,
+                # Degree 3 spherical harmonics: 16 coefficients per channel (up from 9).
+                # Captures finer view-dependent effects (specular highlights, metallic
+                # reflections). Costs ~30% more VRAM but significantly improves realism.
 
-                num_downscales=1,
-                # Start training on images downscaled 2× (2^1), then train the remainder
-                # at full resolution. Using 1 (instead of 2) means fewer low-res steps,
-                # which tends to produce sharper detail in the final splat.
-                max_gauss_ratio= 10
+                num_downscales=0,
+                # Train at full resolution from step 0. With enough iterations (30K)
+                # there's no need for a multi-resolution warmup — the model converges
+                # to sharper detail when it sees full-res images throughout training.
             ),
         ),
         optimizers={
-            # Gaussian positions — use a low LR with no schedule; positions are refined
-            # mostly by densification rather than by gradient descent alone.
+            # Gaussian positions — with exponential decay (100× reduction over training).
+            # Starts broad to let densification place Gaussians, then fine-tunes positions.
             "means": {
                 "optimizer": AdamOptimizerConfig(lr=1.6e-4, eps=1e-15),
-                "scheduler": None,
+                "scheduler": ExponentialDecaySchedulerConfig(
+                    lr_final=1.6e-6,
+                    max_steps=iterations,
+                ),
             },
-            # Quaternion rotations — higher LR so orientations adapt quickly.
+            # Quaternion rotations — decay to prevent jitter in the final output.
             "quats": {
                 "optimizer": AdamOptimizerConfig(lr=1.0e-3, eps=1e-15),
-                "scheduler": None,
+                "scheduler": ExponentialDecaySchedulerConfig(
+                    lr_final=1.0e-5,
+                    max_steps=iterations,
+                ),
             },
-            # Log-scales — moderate LR; scales grow/shrink to cover scene geometry.
+            # Log-scales — moderate decay to stabilise Gaussian sizes late in training.
             "scales": {
                 "optimizer": AdamOptimizerConfig(lr=5e-3, eps=1e-15),
-                "scheduler": None,
+                "scheduler": ExponentialDecaySchedulerConfig(
+                    lr_final=5e-5,
+                    max_steps=iterations,
+                ),
             },
-            # Opacity logits — highest LR so Gaussians can quickly fade out if unused.
+            # Opacity logits — highest LR → rapid fade-out of unused Gaussians.
+            # No decay here: the model should always be able to kill bad splats.
             "opacities": {
                 "optimizer": AdamOptimizerConfig(lr=5e-2, eps=1e-15),
                 "scheduler": None,
             },
-            # SH DC (base color) and higher-order coefficients.
+            # SH DC (base color) — slight decay to lock in colour late in training.
             "features_dc": {
                 "optimizer": AdamOptimizerConfig(lr=2.5e-3, eps=1e-15),
-                "scheduler": None,
+                "scheduler": ExponentialDecaySchedulerConfig(
+                    lr_final=2.5e-4,
+                    max_steps=iterations,
+                ),
             },
+            # SH higher-order — lower LR + decay to prevent SH overfitting.
             "features_rest": {
                 "optimizer": AdamOptimizerConfig(lr=1.25e-4, eps=1e-15),
-                # features_rest uses a lower LR than DC because higher-order SH bands
-                # model fine angular variation and can overfit if updated too aggressively.
-                "scheduler": None,
+                "scheduler": ExponentialDecaySchedulerConfig(
+                    lr_final=1.25e-5,
+                    max_steps=iterations,
+                ),
             },
-            # Camera pose refinement — relatively slow LR to avoid unrolling COLMAP poses.
+            # Camera pose refinement — slow start, decays so poses are frozen by end.
             "camera_opt": {
                 "optimizer": AdamOptimizerConfig(lr=6e-4, eps=1e-15),
-                "scheduler": None,
+                "scheduler": ExponentialDecaySchedulerConfig(
+                    lr_final=6e-6,
+                    max_steps=iterations,
+                ),
             },
         },
         vis="tensorboard",     # "tensorboard" is headless-safe (no HTTP server spun up).
@@ -536,8 +562,8 @@ def prepare_datadir(
 def videos_to_splat(
     meta_data: list[dict],
     output_dir: str = "./",
-    fps: int = 4,
-    iterations: int = 10000,
+    fps: int = 5,
+    iterations: int = 30000,
 ) -> Tuple[Path, SplatfactoModel]:
     """
     Full end-to-end pipeline: video file(s) → prepared dataset → trained splat model.
@@ -554,6 +580,8 @@ def videos_to_splat(
                        <output_dir>/data_prepared/   — nerfstudio dataset
                        <output_dir>/splatfacto/...   — checkpoints + config.yml
         fps:         Frames per second to extract from each video clip.
+                     5 fps provides ~25% more COLMAP points than 4 fps for
+                     better pose estimation and initial Gaussian placement.
         iterations:  Total Splatfacto training iterations.
 
     Returns:
@@ -712,19 +740,34 @@ def export_splat_to_ply(
             map_to_tensors[f"rot_{i}"] = quats[:, i].astype(np.float32)
 
     # --- Filter degenerate Gaussians --------------------------------------------
-    # Build a boolean mask over all fields to remove NaN/Inf values AND
-    # near-invisible Gaussians (opacity logit < logit(1/255) ≈ -5.5373).
+    # Three-pass filtering at export time to produce clean PLY files:
+    #   1. NaN/Inf removal
+    #   2. Low-opacity culling (sigmoid(logit) < 0.1 → nearly invisible)
+    #   3. Oversized Gaussian removal (exp(log_scale) > scene_extent * 0.5)
     select = np.ones(n, dtype=bool)
     for k, t in map_to_tensors.items():
         arr = t.reshape(n) if t.ndim > 1 else t
         select &= np.isfinite(arr)
 
+    # Opacity: remove Gaussians with sigmoid(opacity) < 0.1
+    # logit(0.1) ≈ -2.197. This is much more aggressive than the old logit(1/255)
+    # threshold and catches the semi-transparent haze that makes splats look noisy.
     opa = map_to_tensors["opacity"]
-    select &= opa >= -5.5373   # logit(1/255): below this, alpha < 1/255 (invisible)
+    select &= opa >= -2.197
+
+    # Scale: remove oversized floaters. Any Gaussian with exp(log_scale) > 0.5
+    # in any axis is almost certainly a floater artifact, not real geometry.
+    if all(f"scale_{i}" in map_to_tensors for i in range(3)):
+        scale_arr = np.stack(
+            [map_to_tensors[f"scale_{i}"] for i in range(3)], axis=-1
+        )
+        max_scale = np.exp(scale_arr.astype(np.float64)).max(axis=-1)
+        select &= max_scale <= 0.5
 
     filtered_count = n - int(select.sum())
     if filtered_count > 0:
-        print(f"  Filtered {filtered_count:,}/{n:,} Gaussians (NaN / near-invisible)")
+        print(f"  Filtered {filtered_count:,}/{n:,} Gaussians "
+              f"(NaN / low-opacity / oversized)")
         for k in map_to_tensors:
             map_to_tensors[k] = map_to_tensors[k][select]
         n = int(select.sum())
@@ -843,12 +886,12 @@ def main() -> None:
 
     # --- Training options -------------------------------------------------------
     parser.add_argument(
-        "--fps", type=int, default=4,
+        "--fps", type=int, default=5,
         help="Frames per second to extract from the video for COLMAP processing.",
     )
     parser.add_argument(
-        "--iterations", type=int, default=10000,
-        help="Number of Splatfacto training iterations.",
+        "--iterations", type=int, default=30000,
+        help="Number of Splatfacto training iterations (30K recommended, 10K for previews).",
     )
     parser.add_argument(
         "--output_dir", type=str, default="./output",
@@ -967,19 +1010,21 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    a, model = video_to_splat(
-        meta_data=[{
-            "path": "./Video Project 1.mp4",
-            "start_sec": 10,
-            "end_sec": 100,
-        }, {
-            "path": "./Video Project 2.mp4",
-            "start_sec": 10,
-            "end_sec": 100,
-        }],
-        output_dir="./results",
-        fps=5,
-        iterations=30000,
-    )
-    export_splat_to_ply(model)
-    #main()
+    main()
+
+
+# a, model = videos_to_splat(
+#         meta_data=[{
+#             "path": "./Video Project 1.mp4",
+#             "start_sec": 10,
+#             "end_sec": 100,
+#         }, {
+#             "path": "./Video Project 2.mp4",
+#             "start_sec": 10,
+#             "end_sec": 100,
+#         }],
+#         output_dir="./results",
+#         fps=5,
+#         iterations=30000,
+#     )
+#     export_splat_to_ply(model)

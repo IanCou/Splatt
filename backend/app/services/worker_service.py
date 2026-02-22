@@ -120,7 +120,7 @@ def run_remote_pipeline(task_id: str, local_video_path: str = None, filebin_url:
             f"--video {remote_video_path} "
             f"--output_dir {remote_output_dir} "
             f"--fps 5 "
-            f"--iterations 5000"
+            f"--iterations 30000"
         )
         # Note: results will be written to:
         #   {remote_output_dir}/data_prepared/transforms.json

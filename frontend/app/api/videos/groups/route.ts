@@ -24,8 +24,8 @@ export async function GET() {
       .order("upload_timestamp", { ascending: false })
 
     if (error) {
-        console.log("Supabase error:", error)
-        throw error
+      console.log("Supabase error:", error)
+      throw error
     }
 
     // Group videos by construction objects detected
@@ -96,11 +96,11 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "No video file provided" }, { status: 400 })
     }
 
-    // Forward the video to the FastAPI backend
+    // Forward the video to the FastAPI backend's background pipeline
     const backendFormData = new FormData()
     backendFormData.append("file", file)
 
-    const backendResponse = await fetch(`${BACKEND_URL}/video`, {
+    const backendResponse = await fetch(`${BACKEND_URL}/process-video`, {
       method: "POST",
       body: backendFormData,
     })
@@ -112,30 +112,16 @@ export async function POST(request: Request) {
 
     const result = await backendResponse.json()
 
-    // Extract object types for grouping
-    const objectTypes = new Set<string>()
-    result.detections?.forEach((d: any) => {
-      if (d.object_type) objectTypes.add(d.object_type)
-    })
-
-    const groupName = objectTypes.size > 0
-      ? Array.from(objectTypes).sort().join(", ")
-      : "Ungrouped Videos"
-
     return NextResponse.json({
+      task_id: result.task_id,
+      message: result.message,
       video: {
-        id: result.video_id,
-        filename: result.filename,
-        status: "ready",
-        videoUrl: result.video_url ?? null,
-      },
-      group: {
-        id: `group-${groupName}`,
-        name: groupName,
-      },
-      message: `Video analyzed. Found ${result.total_detections} construction objects.`,
-      detections: result.detections,
+        id: result.task_id,
+        filename: file.name,
+        status: "processing",
+      }
     })
+
   } catch (error: any) {
     console.error("Upload error:", error)
     return NextResponse.json(

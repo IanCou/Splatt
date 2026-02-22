@@ -7,6 +7,8 @@ export interface Video {
   uploadedAt: string
   status: "processing" | "ready" | "error"
   thumbnailUrl: string | null
+  videoUrl?: string | null
+  storagePath?: string | null
   groupId: string | null
 }
 
@@ -26,4 +28,5 @@ export interface UploadProgress {
   progress: number // 0-100
   status: "uploading" | "processing" | "complete" | "error"
   error?: string
+  backendStatus?: string
 }

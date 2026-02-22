@@ -1,16 +1,22 @@
 import base64
 import io
+import json
 import logging
+import math
 import os
+import re
 import tempfile
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Tuple
 from datetime import datetime
 import uuid
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+
+import numpy as np
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, File, UploadFile, HTTPException
+from fastapi import FastAPI, File, UploadFile, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from PIL import Image
@@ -22,6 +28,7 @@ from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmb
 from langchain_core.messages import HumanMessage
 from langchain_core.documents import Document
 from langchain_community.vectorstores import SupabaseVectorStore
+from app.services.worker_service import run_remote_pipeline
 
 load_dotenv()
 
@@ -99,6 +106,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+transforms_path = os.path.join(
+    os.path.dirname(__file__), "..", "frontend", "public", "transforms.json"
+)
+transforms_data = json.load(open(transforms_path))
 
 # ---------------------------------------------------------------------------
 # Endpoints
@@ -172,6 +183,97 @@ async def process_video(file: UploadFile = File(...)):
         if temp_video_path and os.path.exists(temp_video_path):
             os.unlink(temp_video_path)
             logger.debug("Cleaned up temp file | path=%s", temp_video_path)
+
+
+TEMP_DIR = Path("./temp_uploads")
+TEMP_DIR.mkdir(exist_ok=True)
+
+# In-memory store for background task statuses
+# In production, this would be Redis or Supabase
+TASK_STATUSES: Dict[str, Dict] = {}
+
+def update_task_status(task_id: str, status: str, progress: int):
+    """Callback for worker_service to update task state."""
+    TASK_STATUSES[task_id] = {
+        "status": status,
+        "progress": progress,
+        "updated_at": datetime.utcnow().isoformat()
+    }
+    logger.info("Task %s status update: %s (%d%%)", task_id, status, progress)
+
+async def full_pipeline_task(task_id: str, local_path: str, filename: str):
+    """Background task for Gemini analysis and then remote Gaussian Splatting."""
+    try:
+        # 0. Initial Status
+        update_task_status(task_id, "Initializing...", 0)
+
+        # 1. Gemini Analysis (0-9%)
+        update_task_status(task_id, "Analyzing video with Gemini...", 2)
+        logger.info("Starting background frame analysis | task_id=%s", task_id)
+        detections = await analyze_video(local_path, task_id)
+        
+        # Persist metadata and detections to Supabase
+        update_task_status(task_id, "Saving detections to Supabase...", 6)
+        video_metadata = {
+            "id": task_id,
+            "filename": filename,
+            "upload_timestamp": datetime.utcnow().isoformat(),
+            "total_detections": len(detections),
+        }
+        
+        if supabase:
+            supabase.table("videos").insert(video_metadata).execute()
+            if detections:
+                supabase.table("detections").insert(detections).execute()
+                await _store_detection_embeddings(detections, task_id)
+        
+        logger.info("Gemini analysis complete | task_id=%s", task_id)
+        update_task_status(task_id, "Handing off to remote worker...", 9)
+
+        # 2. Remote Splatting (10-100%)
+        # run_remote_pipeline is blocking (SSH) so run in thread pool.
+        # It reports its own progress via the on_progress callback (10 → 100%).
+        # It also cleans up local_path when done.
+        logger.info("Starting remote splatting pipeline | task_id=%s", task_id)
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(
+            None, 
+            lambda: run_remote_pipeline(task_id, local_path, on_progress=update_task_status)
+        )
+        
+    except Exception as e:
+        logger.exception("Background pipeline failed | task_id=%s error=%s", task_id, e)
+        update_task_status(task_id, f"Failed: {str(e)}", -1)
+        if os.path.exists(local_path):
+            os.unlink(local_path)
+
+@app.get("/tasks/{task_id}")
+async def get_task_status(task_id: str):
+    """Check the status of a background task."""
+    if task_id not in TASK_STATUSES:
+        raise HTTPException(status_code=404, detail="Task not found")
+    return TASK_STATUSES[task_id]
+
+@app.post("/process-video")
+async def process_video_pipeline(background_tasks: BackgroundTasks, file: UploadFile = File(...)):
+    if not file.content_type.startswith("video/"):
+        raise HTTPException(status_code=400, detail="File must be a video.")
+
+    task_id = str(uuid.uuid4())
+    local_path = TEMP_DIR / f"{task_id}_{file.filename}"
+    
+    with local_path.open("wb") as buffer:
+        import shutil
+        contents = await file.read()
+        buffer.write(contents)
+    
+    # Run the full pipeline (Gemini + SSH orchestration) in the background
+    background_tasks.add_task(full_pipeline_task, task_id, str(local_path), file.filename)
+    
+    return {
+        "task_id": task_id, 
+        "message": "Processing started. Gemini analysis followed by remote Gaussian Splatting."
+    }
 
 
 @app.post("/process")
@@ -269,6 +371,9 @@ async def analyze_video(video_path: str, video_id: str) -> List[Dict]:
 
             result: FrameDetections = structured_llm.invoke([message])
 
+            print("Fetching coordinates for frame %d from transforms.json" % frame_data["frame_number"])
+            coords = get_coordinates_for_frame(frame_data["frame_number"] + 1)
+            print(f"Frame {frame_data['frame_number']} coords: {coords}")
             detections = [
                 {
                     "video_id": video_id,
@@ -277,6 +382,12 @@ async def analyze_video(video_path: str, video_id: str) -> List[Dict]:
                     "object_type": det.object_type,
                     "description": det.description,
                     "distance_estimate": det.distance_estimate,
+                    "x": coords["x"],
+                    "y": coords["y"],
+                    "z": coords["z"],
+                    "rx": coords["rx"],
+                    "ry": coords["ry"],
+                    "rz": coords["rz"],
                 }
                 for det in result.detections
             ]
@@ -305,6 +416,7 @@ async def _store_detection_embeddings(detections: List[Dict], video_id: str) -> 
     """Embed each detection description and store in Supabase for semantic search."""
     logger.info("Storing %d detection embeddings | video_id=%s", len(detections), video_id)
 
+
     documents = [
         Document(
             page_content=det["description"],
@@ -314,6 +426,12 @@ async def _store_detection_embeddings(detections: List[Dict], video_id: str) -> 
                 "seconds": det["seconds"],
                 "frame_number": det["frame_number"],
                 "distance_estimate": det["distance_estimate"],
+                "x": det["x"],
+                "y": det["y"],
+                "z": det["z"],
+                "rx": det["rx"],
+                "ry": det["ry"],
+                "rz": det["rz"],
             },
         )
         for det in detections
@@ -341,6 +459,54 @@ def _pil_to_data_url(image: Image.Image) -> str:
     image.save(buf, format="JPEG")
     b64 = base64.b64encode(buf.getvalue()).decode()
     return f"data:image/jpeg;base64,{b64}"
+
+def get_coordinates_for_frame(frame: int) -> Dict:
+    """Extract position and rotation from transforms.json for a given frame index.
+
+    Parameters
+    ----------
+    frame : int
+        Frame number (e.g. 20 for ``images/frame_00020.jpg``).
+
+    Returns
+    -------
+    dict
+        ``file_path``, ``position`` (x, y, z) and ``rotation`` (rx, ry, rz in
+        degrees) extracted from the frame's 4×4 transform matrix.
+    """
+
+
+    target_path = f"images/frame_{frame:05d}.jpg"
+    f = None
+    for entry in transforms_data["frames"]:
+        if entry["file_path"] == target_path:
+            f = entry
+            break
+
+    if f is None:
+        return {"x": 0, "y": 0, "z": 0, "rx": 0, "ry": 0, "rz": 0}
+
+    m = np.array(f["transform_matrix"])
+
+    # Position (translation column)
+    x, y, z = float(m[0, 3]), float(m[1, 3]), float(m[2, 3])
+
+    # Rotation (Euler angles from the 3×3 rotation sub-matrix)
+    r = m[:3, :3]
+    sy = math.sqrt(r[0, 0] ** 2 + r[1, 0] ** 2)
+    roll = math.atan2(r[2, 1], r[2, 2])
+    pitch = math.atan2(-r[2, 0], sy)
+    yaw = math.atan2(r[1, 0], r[0, 0])
+
+    return {
+        "file_path": f["file_path"],
+        "x": x,
+        "y": y,
+        "z": z,
+        "rx": round(math.degrees(roll), 2),
+        "ry": round(math.degrees(pitch), 2),
+        "rz": round(math.degrees(yaw), 2),
+    }
 
 
 if __name__ == "__main__":

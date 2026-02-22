@@ -27,3 +27,4 @@ backend-server.log
 claude.md
 frontend-server.log
 /backend/results
+/backend/temp_uploads

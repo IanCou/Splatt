@@ -515,6 +515,46 @@ async def process_image(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get("/object-positions")
+async def get_object_positions(video_id: Optional[str] = None):
+    """Get all detected objects with their calculated 3D positions.
+
+    Parameters
+    ----------
+    video_id : str, optional
+        Filter by specific video ID. If not provided, returns all objects.
+
+    Returns
+    -------
+    dict
+        List of objects with positions and metadata
+    """
+    if not supabase:
+        raise HTTPException(
+            status_code=500,
+            detail="Supabase is not configured."
+        )
+
+    try:
+        query = supabase.table("detections").select("*")
+
+        if video_id:
+            query = query.eq("video_id", video_id)
+
+        result = query.execute()
+
+        logger.info("Fetched %d object positions | video_id=%s", len(result.data), video_id or "all")
+
+        return JSONResponse(content={
+            "objects": result.data,
+            "count": len(result.data),
+        })
+
+    except Exception as e:
+        logger.exception("Failed to fetch object positions | error=%s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 # ---------------------------------------------------------------------------
 # Video analysis
 # ---------------------------------------------------------------------------
@@ -626,6 +666,9 @@ async def analyze_video(video_path: str, video_id: str) -> List[Dict]:
                     "rx": None,
                     "ry": None,
                     "rz": None,
+                    "obj_x": None,
+                    "obj_y": None,
+                    "obj_z": None,
                 }
                 for det in result.detections
             ]
@@ -670,6 +713,9 @@ async def _store_detection_embeddings(detections: List[Dict], video_id: str) -> 
                 "rx": det["rx"],
                 "ry": det["ry"],
                 "rz": det["rz"],
+                "obj_x": det.get("obj_x"),
+                "obj_y": det.get("obj_y"),
+                "obj_z": det.get("obj_z"),
             },
         )
         for det in detections
@@ -747,6 +793,50 @@ def get_coordinates_for_frame(frame: int, transforms_data: Dict) -> Dict:
     }
 
 
+def calculate_object_position(camera_x: float, camera_y: float, camera_z: float,
+                             camera_rx: float, camera_ry: float, camera_rz: float,
+                             distance: float) -> Tuple[float, float, float]:
+    """Calculate object position from camera pose and distance estimate.
+
+    Parameters
+    ----------
+    camera_x, camera_y, camera_z : float
+        Camera position in world coordinates (meters)
+    camera_rx, camera_ry, camera_rz : float
+        Camera rotation in degrees (roll, pitch, yaw)
+    distance : float
+        Distance from camera to object (meters)
+
+    Returns
+    -------
+    tuple
+        (obj_x, obj_y, obj_z) - Object position in world coordinates
+    """
+    if distance is None or distance == 0:
+        # If no distance estimate, return camera position
+        return (camera_x, camera_y, camera_z)
+
+    # Convert degrees to radians
+    roll = math.radians(camera_rx)
+    pitch = math.radians(camera_ry)
+    yaw = math.radians(camera_rz)
+
+    # Camera forward direction in local space is typically [0, 0, -1]
+    # We need to rotate this by the camera's rotation to get world-space direction
+    # Using yaw (horizontal rotation) and pitch (vertical tilt)
+    # Direction vector: [sin(yaw)*cos(pitch), sin(pitch), -cos(yaw)*cos(pitch)]
+    dir_x = math.sin(yaw) * math.cos(pitch)
+    dir_y = -math.sin(pitch)  # Negative because Y might be up in your coordinate system
+    dir_z = -math.cos(yaw) * math.cos(pitch)
+
+    # Calculate object position: camera position + direction * distance
+    obj_x = camera_x + dir_x * distance
+    obj_y = camera_y + dir_y * distance
+    obj_z = camera_z + dir_z * distance
+
+    return (obj_x, obj_y, obj_z)
+
+
 def _backfill_coordinates_sync(task_id: str, transforms_data: Dict) -> List[Dict]:
     """Fetch all detections for a video from Supabase, update their camera coordinates
     using transforms.json, and return the fully-populated detection dicts so the caller
@@ -774,6 +864,14 @@ def _backfill_coordinates_sync(task_id: str, transforms_data: Dict) -> List[Dict
     filled: List[Dict] = []
     for det in detections:
         coords = get_coordinates_for_frame(det["frame_number"] + 1, transforms_data)
+
+        # Calculate object position from camera pose + distance
+        obj_x, obj_y, obj_z = calculate_object_position(
+            coords["x"], coords["y"], coords["z"],
+            coords["rx"], coords["ry"], coords["rz"],
+            det.get("distance_estimate", 0)
+        )
+
         supabase.table("detections").update({
             "x": coords["x"],
             "y": coords["y"],
@@ -781,6 +879,9 @@ def _backfill_coordinates_sync(task_id: str, transforms_data: Dict) -> List[Dict
             "rx": coords["rx"],
             "ry": coords["ry"],
             "rz": coords["rz"],
+            "obj_x": round(obj_x, 3),
+            "obj_y": round(obj_y, 3),
+            "obj_z": round(obj_z, 3),
         }).eq("id", det["id"]).execute()
         filled.append({
             "video_id": det["video_id"],
@@ -795,6 +896,9 @@ def _backfill_coordinates_sync(task_id: str, transforms_data: Dict) -> List[Dict
             "rx": coords["rx"],
             "ry": coords["ry"],
             "rz": coords["rz"],
+            "obj_x": round(obj_x, 3),
+            "obj_y": round(obj_y, 3),
+            "obj_z": round(obj_z, 3),
         })
 
     logger.info("Coordinate backfill complete | task_id=%s", task_id)

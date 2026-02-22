@@ -24,6 +24,25 @@ interface MapPoint {
   }>
 }
 
+interface DetectedObject {
+  id: string
+  videoId: string
+  seconds: number
+  frameNumber: number
+  objectType: string
+  description: string
+  distanceEstimate: number | null
+  x: number
+  y: number
+  z: number
+  rx: number
+  ry: number
+  rz: number
+  obj_x: number
+  obj_y: number
+  obj_z: number
+}
+
 interface MapViewerProps {
   videoId: string
   videoName: string
@@ -40,6 +59,80 @@ const TYPE_COLORS: Record<string, string> = {
   structures: "#ef4444",
 }
 
+// Template objects for testing (will be replaced with backend data)
+const TEMPLATE_OBJECTS: DetectedObject[] = [
+  {
+    id: "obj1",
+    videoId: "test",
+    seconds: 2.0,
+    frameNumber: 10,
+    objectType: "equipment",
+    description: "Orange excavator",
+    distanceEstimate: 5.2,
+    x: 0, y: 0, z: 0,
+    rx: 0, ry: 0, rz: 0,
+    obj_x: 2.5,
+    obj_y: 0.5,
+    obj_z: 3.0,
+  },
+  {
+    id: "obj2",
+    videoId: "test",
+    seconds: 3.5,
+    frameNumber: 15,
+    objectType: "materials",
+    description: "Stack of concrete blocks",
+    distanceEstimate: 8.1,
+    x: 0, y: 0, z: 0,
+    rx: 0, ry: 0, rz: 0,
+    obj_x: -1.2,
+    obj_y: 0,
+    obj_z: 4.5,
+  },
+  {
+    id: "obj3",
+    videoId: "test",
+    seconds: 5.0,
+    frameNumber: 20,
+    objectType: "workers",
+    description: "Construction worker in safety vest",
+    distanceEstimate: 3.5,
+    x: 0, y: 0, z: 0,
+    rx: 0, ry: 0, rz: 0,
+    obj_x: 1.8,
+    obj_y: 0,
+    obj_z: -2.0,
+  },
+  {
+    id: "obj4",
+    videoId: "test",
+    seconds: 7.2,
+    frameNumber: 30,
+    objectType: "vehicles",
+    description: "Dump truck parked",
+    distanceEstimate: 12.0,
+    x: 0, y: 0, z: 0,
+    rx: 0, ry: 0, rz: 0,
+    obj_x: -3.5,
+    obj_y: 0,
+    obj_z: -1.5,
+  },
+  {
+    id: "obj5",
+    videoId: "test",
+    seconds: 9.8,
+    frameNumber: 40,
+    objectType: "structures",
+    description: "Scaffolding framework",
+    distanceEstimate: 6.8,
+    x: 0, y: 0, z: 0,
+    rx: 0, ry: 0, rz: 0,
+    obj_x: 0.5,
+    obj_y: 2.0,
+    obj_z: 5.2,
+  },
+]
+
 export function MapViewer({ videoId, videoName, onClose }: MapViewerProps) {
   const { data, isLoading, error } = useSWR<{ videoId: string; points: MapPoint[] }>(
     `/api/videos/${videoId}/coordinates`,
@@ -49,7 +142,11 @@ export function MapViewer({ videoId, videoName, onClose }: MapViewerProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const containerRef = useRef<HTMLDivElement>(null)
   const [hoveredPoint, setHoveredPoint] = useState<MapPoint | null>(null)
+  const [hoveredObject, setHoveredObject] = useState<DetectedObject | null>(null)
   const [tooltipPos, setTooltipPos] = useState<{ x: number; y: number }>({ x: 0, y: 0 })
+
+  // Use template objects for now (will be replaced with backend data)
+  const detectedObjects = TEMPLATE_OBJECTS
 
   // Transform and viewport state
   const [offset, setOffset] = useState<{ x: number; y: number }>({ x: 0, y: 0 })
@@ -62,10 +159,10 @@ export function MapViewer({ videoId, videoName, onClose }: MapViewerProps) {
 
   // Compute bounding box
   const getBounds = useCallback(() => {
-    if (points.length === 0) return { minX: -5, maxX: 5, minZ: -5, maxZ: 5 }
+    if (points.length === 0 && detectedObjects.length === 0) return { minX: -5, maxX: 5, minZ: -5, maxZ: 5 }
     // Use x and z for bird's eye view (top-down)
-    const xs = points.map((p) => p.x)
-    const zs = points.map((p) => p.z)
+    const xs = [...points.map((p) => p.x), ...detectedObjects.map((o) => o.obj_x)]
+    const zs = [...points.map((p) => p.z), ...detectedObjects.map((o) => o.obj_z)]
     const minX = Math.min(...xs)
     const maxX = Math.max(...xs)
     const minZ = Math.min(...zs)
@@ -73,7 +170,7 @@ export function MapViewer({ videoId, videoName, onClose }: MapViewerProps) {
     const padX = Math.max((maxX - minX) * 0.15, 1)
     const padZ = Math.max((maxZ - minZ) * 0.15, 1)
     return { minX: minX - padX, maxX: maxX + padX, minZ: minZ - padZ, maxZ: maxZ + padZ }
-  }, [points])
+  }, [points, detectedObjects])
 
   // Fit view to data on first load
   useEffect(() => {
@@ -257,6 +354,48 @@ export function MapViewer({ videoId, videoName, onClose }: MapViewerProps) {
       }
     })
 
+    // Draw detected objects
+    detectedObjects.forEach((obj) => {
+      const sp = worldToScreen(obj.obj_x, obj.obj_z)
+      const isHovered = hoveredObject?.id === obj.id
+      const color = TYPE_COLORS[obj.objectType] || "#f97316"
+
+      // Object marker - distinct from camera points
+      // Outer glow
+      if (isHovered) {
+        ctx.beginPath()
+        ctx.arc(sp.x, sp.y, 14, 0, Math.PI * 2)
+        ctx.fillStyle = `${color}30`
+        ctx.fill()
+      }
+
+      // Square marker for objects (vs circles for camera)
+      const size = isHovered ? 10 : 7
+      ctx.fillStyle = color
+      ctx.fillRect(sp.x - size / 2, sp.y - size / 2, size, size)
+
+      // Inner marker
+      const innerSize = isHovered ? 4 : 3
+      ctx.fillStyle = "#0a0f1a"
+      ctx.fillRect(sp.x - innerSize / 2, sp.y - innerSize / 2, innerSize, innerSize)
+
+      // Optional: draw line from camera to object
+      if (isHovered && obj.frameNumber !== undefined) {
+        const cameraPoint = sorted.find(p => p.frameNumber === obj.frameNumber)
+        if (cameraPoint) {
+          const cameraScreen = worldToScreen(cameraPoint.x, cameraPoint.z)
+          ctx.strokeStyle = `${color}40`
+          ctx.lineWidth = 1
+          ctx.setLineDash([2, 2])
+          ctx.beginPath()
+          ctx.moveTo(cameraScreen.x, cameraScreen.y)
+          ctx.lineTo(sp.x, sp.y)
+          ctx.stroke()
+          ctx.setLineDash([])
+        }
+      }
+    })
+
     // Draw viewing direction for hovered point
     if (hoveredPoint) {
       const sp = worldToScreen(hoveredPoint.x, hoveredPoint.z)
@@ -287,7 +426,7 @@ export function MapViewer({ videoId, videoName, onClose }: MapViewerProps) {
       ctx.closePath()
       ctx.fill()
     }
-  }, [points, scale, offset, hoveredPoint, worldToScreen, screenToWorld])
+  }, [points, detectedObjects, scale, offset, hoveredPoint, hoveredObject, worldToScreen, screenToWorld])
 
   // Resize observer
   useEffect(() => {
@@ -323,22 +462,38 @@ export function MapViewer({ videoId, videoName, onClose }: MapViewerProps) {
         return
       }
 
-      // Hit test points
+      // Hit test objects first (prioritize objects over camera points)
       const hitRadius = 12
-      let found: MapPoint | null = null
-      for (const p of points) {
-        const sp = worldToScreen(p.x, p.z)
+      let foundObject: DetectedObject | null = null
+      for (const obj of detectedObjects) {
+        const sp = worldToScreen(obj.obj_x, obj.obj_z)
         const dx = sp.x - mx
         const dy = sp.y - my
         if (dx * dx + dy * dy < hitRadius * hitRadius) {
-          found = p
+          foundObject = obj
           break
         }
       }
-      setHoveredPoint(found)
+
+      // Hit test camera points
+      let foundPoint: MapPoint | null = null
+      if (!foundObject) {
+        for (const p of points) {
+          const sp = worldToScreen(p.x, p.z)
+          const dx = sp.x - mx
+          const dy = sp.y - my
+          if (dx * dx + dy * dy < hitRadius * hitRadius) {
+            foundPoint = p
+            break
+          }
+        }
+      }
+
+      setHoveredObject(foundObject)
+      setHoveredPoint(foundPoint)
       setTooltipPos({ x: mx, y: my })
     },
-    [isDragging, points, worldToScreen]
+    [isDragging, points, detectedObjects, worldToScreen]
   )
 
   const handleMouseUp = useCallback(() => {
@@ -489,12 +644,13 @@ export function MapViewer({ videoId, videoName, onClose }: MapViewerProps) {
           onMouseLeave={() => {
             setIsDragging(false)
             setHoveredPoint(null)
+            setHoveredObject(null)
           }}
           onWheel={handleWheel}
         />
 
-        {/* Tooltip */}
-        {hoveredPoint && (
+        {/* Tooltip for Camera Points */}
+        {hoveredPoint && !hoveredObject && (
           <div
             className="pointer-events-none absolute z-10 max-w-72 rounded-lg border border-border bg-card/95 px-3 py-2 shadow-lg backdrop-blur-sm"
             style={{
@@ -540,6 +696,44 @@ export function MapViewer({ videoId, videoName, onClose }: MapViewerProps) {
           </div>
         )}
 
+        {/* Tooltip for Detected Objects */}
+        {hoveredObject && (
+          <div
+            className="pointer-events-none absolute z-10 max-w-72 rounded-lg border-2 border-primary bg-card/95 px-3 py-2 shadow-lg backdrop-blur-sm"
+            style={{
+              left: Math.min(tooltipPos.x + 16, (containerRef.current?.clientWidth ?? 300) - 300),
+              top: Math.max(tooltipPos.y - 10, 8),
+            }}
+          >
+            <div className="flex items-center gap-2 mb-1.5">
+              <span
+                className="inline-block h-3 w-3 shrink-0 rounded"
+                style={{ backgroundColor: TYPE_COLORS[hoveredObject.objectType] || "#f97316" }}
+              />
+              <span className="text-[10px] font-bold text-primary uppercase">{hoveredObject.objectType}</span>
+            </div>
+            <p className="text-xs font-semibold text-foreground mb-2">{hoveredObject.description}</p>
+            <div className="flex flex-col gap-1 text-[10px] text-muted-foreground">
+              <div className="flex items-center gap-2">
+                <span className="font-medium">Frame:</span>
+                <span>{hoveredObject.frameNumber} @ {hoveredObject.seconds.toFixed(1)}s</span>
+              </div>
+              {hoveredObject.distanceEstimate != null && (
+                <div className="flex items-center gap-2">
+                  <span className="font-medium">Distance:</span>
+                  <span>{hoveredObject.distanceEstimate.toFixed(1)}m from camera</span>
+                </div>
+              )}
+            </div>
+            <div className="flex flex-wrap gap-1.5 text-[10px] text-muted-foreground border-t border-border pt-1 mt-1.5">
+              <span className="font-medium">Position:</span>
+              <span>X: {hoveredObject.obj_x.toFixed(2)}</span>
+              <span>Z: {hoveredObject.obj_z.toFixed(2)}</span>
+              <span>Y: {hoveredObject.obj_y.toFixed(2)}</span>
+            </div>
+          </div>
+        )}
+
         {/* Legend */}
         <div className="absolute bottom-3 left-3 flex flex-col gap-1 rounded-lg bg-background/80 px-3 py-2 text-xs backdrop-blur-sm">
           <span className="font-medium text-foreground mb-0.5">Camera Path</span>
@@ -555,10 +749,20 @@ export function MapViewer({ videoId, videoName, onClose }: MapViewerProps) {
             <span className="inline-block h-3 w-3 rounded-sm border border-orange-500/50 bg-orange-500/20" />
             <span className="text-muted-foreground">Trajectory</span>
           </div>
-          <span className="font-medium text-foreground mt-1.5 mb-0.5">Detections</span>
+          <span className="font-medium text-foreground mt-1.5 mb-0.5">Detected Objects</span>
+          <div className="flex items-center gap-1.5 mb-1">
+            <div className="flex items-center gap-1">
+              <span className="inline-block h-2 w-2 rounded-full bg-muted-foreground/40" />
+              <span className="text-[10px] text-muted-foreground">Camera</span>
+            </div>
+            <div className="flex items-center gap-1">
+              <span className="inline-block h-2 w-2 rounded-sm bg-muted-foreground/40" />
+              <span className="text-[10px] text-muted-foreground">Object</span>
+            </div>
+          </div>
           {Object.entries(TYPE_COLORS).map(([type, color]) => (
             <div key={type} className="flex items-center gap-1.5">
-              <span className="inline-block h-2 w-2 rounded-full" style={{ backgroundColor: color }} />
+              <span className="inline-block h-2 w-2 rounded-sm" style={{ backgroundColor: color }} />
               <span className="text-muted-foreground capitalize">{type}</span>
             </div>
           ))}

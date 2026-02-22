@@ -2,6 +2,7 @@
 
 import { useState, useRef, useCallback, useEffect } from "react"
 import useSWR from "swr"
+import { toast } from "sonner"
 import { Card } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -22,6 +23,7 @@ import {
   HardDrive,
   Film,
   X,
+  MapPin,
 } from "lucide-react"
 import type { VideoGroup, UploadProgress } from "@/lib/types"
 
@@ -47,11 +49,18 @@ function formatDate(iso: string): string {
 
 const fetcher = (url: string) => fetch(url).then((r) => r.json())
 
-function VideoCard({ video }: { video: VideoGroup["videos"][number] }) {
+function VideoCard({ video, onVideoClick }: { video: VideoGroup["videos"][number]; onVideoClick?: (videoId: string, videoName: string) => void }) {
   return (
     <div className="flex items-center gap-3 rounded-lg border border-border bg-background p-3 transition-colors hover:border-primary/30">
       <div className="min-w-0 flex-1">
-        <p className="truncate text-sm font-medium text-foreground">{video.originalName}</p>
+        <button
+          className="truncate text-sm font-medium text-foreground hover:text-primary hover:underline underline-offset-2 transition-colors text-left w-full flex items-center gap-1.5"
+          onClick={() => onVideoClick?.(video.id, video.originalName)}
+          title="View camera path on map"
+        >
+          <MapPin className="h-3 w-3 shrink-0 text-primary/60" />
+          {video.originalName}
+        </button>
         <div className="mt-1 flex items-center gap-3 text-xs text-muted-foreground">
           <span>{formatDate(video.uploadedAt)}</span>
         </div>
@@ -79,10 +88,12 @@ function GroupCard({
   group,
   isExpanded,
   onToggle,
+  onVideoClick,
 }: {
   group: VideoGroup
   isExpanded: boolean
   onToggle: () => void
+  onVideoClick?: (videoId: string, videoName: string) => void
 }) {
   return (
     <Card className="gap-0 overflow-hidden border-border bg-card">
@@ -123,7 +134,7 @@ function GroupCard({
           </div>
           <div className="flex flex-col gap-2">
             {group.videos.map((video) => (
-              <VideoCard key={video.id} video={video} />
+              <VideoCard key={video.id} video={video} onVideoClick={onVideoClick} />
             ))}
             {group.videos.length === 0 && (
               <p className="py-4 text-center text-sm text-muted-foreground">No videos in this group yet</p>
@@ -175,7 +186,7 @@ function UploadItem({ upload, onDismiss }: { upload: UploadProgress; onDismiss: 
   )
 }
 
-export function VideoLibrary() {
+export function VideoLibrary({ onVideoClick }: { onVideoClick?: (videoId: string, videoName: string) => void } = {}) {
   const { data, mutate, isLoading } = useSWR<{ groups: VideoGroup[] }>("/api/videos/groups", fetcher)
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set())
   const [uploads, setUploads] = useState<UploadProgress[]>([])
@@ -209,16 +220,25 @@ export function VideoLibrary() {
             // Update if status or progress changed
             if (current.backendStatus !== data.status || current.progress !== data.progress) {
               needsUpdate = true
+              const isComplete = data.progress === 100
+              const isError = data.progress === -1
               updatedUploads[index] = {
                 ...current,
                 backendStatus: data.status,
-                progress: data.progress,
-                status: data.progress === 100 ? "complete" : data.progress === -1 ? "error" : "processing",
-                error: data.progress === -1 ? data.status : undefined
+                progress: Math.max(current.progress, data.progress),
+                status: isComplete ? "complete" : isError ? "error" : "processing",
+                error: isError ? data.status : undefined
               }
 
-              if (data.progress === 100) {
+              if (isComplete) {
                 mutate() // Refresh library when a task finishes
+                toast.success(`"${current.filename}" processed successfully`, {
+                  description: "Video analyzed and added to library",
+                })
+              } else if (isError) {
+                toast.error(`"${current.filename}" failed`, {
+                  description: data.status,
+                })
               }
             }
           }
@@ -313,9 +333,9 @@ export function VideoLibrary() {
           prev.map((u) => (u.id === currentId ? {
             ...u,
             id: `task-${backendTaskId}`,
-            progress: 5,
+            progress: 80,
             status: "processing",
-            backendStatus: "Processing started..."
+            backendStatus: "Analyzing video..."
           } : u))
         )
         currentId = `task-${backendTaskId}`
@@ -327,6 +347,9 @@ export function VideoLibrary() {
             u.id === currentId ? { ...u, progress: 0, status: "error", error: err.message || "Upload failed. Try again." } : u
           )
         )
+        toast.error("Upload failed", {
+          description: err.message || "Something went wrong. Try again.",
+        })
       }
     },
     [mutate]
@@ -476,6 +499,7 @@ export function VideoLibrary() {
                   group={group}
                   isExpanded={expandedGroups.has(group.id)}
                   onToggle={() => toggleGroup(group.id)}
+                  onVideoClick={onVideoClick}
                 />
               ))}
             </div>

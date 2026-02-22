@@ -119,6 +119,7 @@ def run_remote_pipeline(task_id: str, local_video_path: str = None, filebin_url:
             f"/opt/miniforge3/envs/nerf/bin/python Nerf4Dgsplat.py "
             f"--video {remote_video_path} "
             f"--output_dir {remote_output_dir} "
+            f"--fps 5 "
             f"--iterations 5000"
         )
         # Note: results will be written to:

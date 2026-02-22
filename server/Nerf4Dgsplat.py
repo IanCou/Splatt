@@ -967,4 +967,19 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    a, model = video_to_splat(
+        meta_data=[{
+            "path": "./Video Project 1.mp4",
+            "start_sec": 10,
+            "end_sec": 100,
+        }, {
+            "path": "./Video Project 2.mp4",
+            "start_sec": 10,
+            "end_sec": 100,
+        }],
+        output_dir="./results",
+        fps=5,
+        iterations=30000,
+    )
+    export_splat_to_ply(model)
+    #main()

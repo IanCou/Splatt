@@ -26,3 +26,7 @@ Thumbs.db
 backend-server.log
 claude.md
 frontend-server.log
+
+/results/
+backend/results/
+backend/temp_uploads/

@@ -72,6 +72,11 @@ class FilebinVideoRequest(BaseModel):
     filename: str = Field(description="Original filename of the video")
 
 
+class SearchRequest(BaseModel):
+    query: str = Field(description="Natural language search query")
+    limit: int = Field(default=10, description="Max results to return")
+
+
 # ---------------------------------------------------------------------------
 # LangChain model singletons (initialised once at startup)
 # ---------------------------------------------------------------------------
@@ -429,6 +434,60 @@ async def process_video_filebin(background_tasks: BackgroundTasks, request: File
     }
 
 
+@app.post("/search")
+async def semantic_search(request: SearchRequest):
+    """Search detections using pgvector semantic similarity.
+
+    Calls the Supabase RPC function directly instead of going through
+    LangChain's SupabaseVectorStore, which is incompatible with newer
+    versions of supabase-py / postgrest-py.
+    """
+    if not supabase:
+        raise HTTPException(status_code=500, detail="Supabase not configured")
+
+    try:
+        # 1. Embed the query text
+        loop = asyncio.get_running_loop()
+        query_embedding = await loop.run_in_executor(
+            None, lambda: embeddings.embed_query(request.query)
+        )
+
+        # 2. Call the match function via Supabase RPC
+        rpc_response = (
+            supabase.rpc(
+                EMBEDDINGS_MATCH_FN,
+                {
+                    "query_embedding": query_embedding,
+                    "match_count": request.limit,
+                },
+            ).execute()
+        )
+
+        rows = rpc_response.data or []
+
+        hits = []
+        for row in rows:
+            meta = row.get("metadata") or {}
+            hits.append({
+                "description": row.get("content", ""),
+                "score": round(float(row.get("similarity", 0)), 4),
+                "videoId": meta.get("video_id"),
+                "objectType": meta.get("object_type"),
+                "seconds": meta.get("seconds"),
+                "frameNumber": meta.get("frame_number"),
+                "distanceEstimate": meta.get("distance_estimate"),
+                "x": meta.get("x"),
+                "y": meta.get("y"),
+                "z": meta.get("z"),
+            })
+
+        return {"query": request.query, "results": hits}
+
+    except Exception as e:
+        logger.exception("Search failed | query=%s error=%s", request.query, e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.post("/process")
 async def process_image(
     file: UploadFile = File(...),
@@ -460,9 +519,19 @@ async def process_image(
 # Video analysis
 # ---------------------------------------------------------------------------
 
+# FPS at which the splatting pipeline extracts frames (--fps flag in worker_service.py)
+SPLAT_FPS = 5
+# FPS at which Gemini analyzes frames (can be lower than SPLAT_FPS to save API calls)
+GEMINI_FPS = 1
+
 async def analyze_video(video_path: str, video_id: str) -> List[Dict]:
-    """Extract frames from a video and analyze each with Gemini in parallel."""
-    SAMPLING_INTERVAL_SECONDS = 10
+    """Extract frames from a video and analyze each with Gemini in parallel.
+
+    Frames are sampled at GEMINI_FPS (1 fps) but the ``frame_number`` stored
+    is the splatting-pipeline-equivalent sequential index (as if extracted at
+    SPLAT_FPS).  This way, during backfill ``frame_number + 1`` still maps
+    correctly to ``frame_{N:05d}.jpg`` in transforms.json.
+    """
     MAX_IMAGE_DIMENSION = 1024
     PROMPT = (
         "Analyze this construction site image and identify all construction objects and furniture present. "
@@ -480,21 +549,32 @@ async def analyze_video(video_path: str, video_id: str) -> List[Dict]:
     )
 
     video = cv2.VideoCapture(video_path)
-    fps = video.get(cv2.CAP_PROP_FPS)
+    source_fps = video.get(cv2.CAP_PROP_FPS)
     total_frames = int(video.get(cv2.CAP_PROP_FRAME_COUNT))
-    frame_interval = max(1, int(fps * SAMPLING_INTERVAL_SECONDS))
+
+    # Interval (in source frames) between Gemini-analyzed frames.
+    # e.g. 30fps source / 1 GEMINI_FPS = every 30th source frame.
+    gemini_interval = max(1, round(source_fps / GEMINI_FPS))
+
+    # Interval (in source frames) between splatting pipeline frames.
+    # e.g. 30fps source / 5 SPLAT_FPS = every 6th source frame.
+    splat_interval = max(1, round(source_fps / SPLAT_FPS))
 
     frames_to_analyze = []
-    frame_count = 0
+    source_frame_idx = 0
 
-    logger.info("Extracting frames | fps=%.2f total_frames=%d", fps, total_frames)
+    logger.info(
+        "Extracting frames | source_fps=%.2f total_source_frames=%d "
+        "gemini_fps=%d (every %d source frames) splat_fps=%d",
+        source_fps, total_frames, GEMINI_FPS, gemini_interval, SPLAT_FPS,
+    )
 
     while True:
         ret, frame = video.read()
         if not ret:
             break
 
-        if frame_count % frame_interval == 0:
+        if source_frame_idx % gemini_interval == 0:
             frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             pil_image = Image.fromarray(frame_rgb)
 
@@ -503,16 +583,20 @@ async def analyze_video(video_path: str, video_id: str) -> List[Dict]:
                 new_size = (int(pil_image.size[0] * ratio), int(pil_image.size[1] * ratio))
                 pil_image = pil_image.resize(new_size, Image.Resampling.LANCZOS)
 
+            # Compute the equivalent splatting frame index for this source frame.
+            # This is which sequential frame the splatting pipeline would assign.
+            splat_frame_idx = source_frame_idx // splat_interval
+
             frames_to_analyze.append({
                 "image": pil_image,
-                "timestamp": frame_count / fps,
-                "frame_number": frame_count,
+                "timestamp": round(source_frame_idx / source_fps, 2),
+                "frame_number": splat_frame_idx,
             })
 
-        frame_count += 1
+        source_frame_idx += 1
 
     video.release()
-    logger.info("Extracted %d frames for analysis", len(frames_to_analyze))
+    logger.info("Extracted %d frames for Gemini analysis (at %d fps)", len(frames_to_analyze), GEMINI_FPS)
 
     def analyze_frame_sync(frame_data: Dict) -> List[Dict]:
         """Analyze a single frame via LangChain structured output (runs in thread pool)."""
@@ -523,6 +607,10 @@ async def analyze_video(video_path: str, video_id: str) -> List[Dict]:
             ])
 
             result: FrameDetections = structured_llm.invoke([message])
+
+            if result is None or not hasattr(result, "detections"):
+                logger.warning("⚠ Frame %d: Gemini returned empty/invalid response, skipping", frame_data["frame_number"])
+                return []
 
             detections = [
                 {

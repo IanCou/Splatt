@@ -39,30 +39,29 @@ function HotspotDot({
     >
       {/* Pulse ring */}
       <span
-        className={`absolute inset-0 -m-2 animate-ping rounded-full opacity-40 ${typeColor[spot.type]} ${
-          isActive ? "opacity-60" : isHighlighted ? "opacity-50" : ""
-        }`}
+        className={`absolute inset-0 -m-3 animate-ping rounded-full opacity-60 bg-white ${isActive ? "opacity-30" : isHighlighted ? "opacity-20" : "opacity-0"
+          }`}
         style={{ animationDuration: isActive ? "1s" : "2.5s" }}
       />
+
       {/* Outer glow */}
       <span
-        className={`absolute inset-0 -m-1.5 rounded-full ${typeColor[spot.type]} ${
-          isActive ? "opacity-30" : "opacity-15"
-        } transition-opacity group-hover:opacity-30`}
+        className={`absolute inset-0 -m-1.5 rounded-full bg-white ${isActive ? "opacity-20" : "opacity-0"
+          } transition-opacity group-hover:opacity-30`}
       />
+
       {/* Dot */}
-      <span
-        className={`relative block h-3.5 w-3.5 rounded-full border-2 border-background shadow-lg transition-transform ${typeColor[spot.type]} ${
-          isActive ? "scale-125" : "group-hover:scale-110"
-        }`}
-      />
+      <div className={`relative flex h-4 w-4 items-center justify-center rounded-full border-2 border-black bg-white shadow-[0_0_15px_rgba(255,255,255,0.5)] transition-all ${isActive ? "scale-125 ring-4 ring-white/20" : "group-hover:scale-110"
+        }`}>
+        <div className="h-1.5 w-1.5 rounded-full bg-black" />
+      </div>
+
       {/* Label */}
       <span
-        className={`absolute left-1/2 top-full mt-1.5 -translate-x-1/2 whitespace-nowrap rounded-md px-2 py-0.5 text-xs font-medium transition-opacity ${
-          isActive
-            ? "bg-primary text-primary-foreground opacity-100"
-            : "bg-card text-card-foreground opacity-0 group-hover:opacity-100"
-        } border border-border shadow-md`}
+        className={`absolute left-1/2 top-full mt-3 -translate-x-1/2 whitespace-nowrap rounded-full px-3 py-1 text-[10px] font-bold uppercase tracking-widest transition-all ${isActive
+            ? "bg-white text-black opacity-100 translate-y-0"
+            : "bg-black/80 text-white opacity-0 group-hover:opacity-100 translate-y-1"
+          } border border-white/20 backdrop-blur-md shadow-2xl`}
       >
         {spot.label}
       </span>
@@ -87,12 +86,12 @@ export function SceneViewer({ hotspots, activeHotspot, onHotspotClick, highlight
       ctx.scale(dpr, dpr)
 
       // Background
-      ctx.fillStyle = "#0f1724"
+      ctx.fillStyle = "#000000"
       ctx.fillRect(0, 0, rect.width, rect.height)
 
       // Grid
-      const gridSize = 40
-      ctx.strokeStyle = "rgba(148, 163, 184, 0.06)"
+      const gridSize = 60
+      ctx.strokeStyle = "rgba(255, 255, 255, 0.05)"
       ctx.lineWidth = 1
 
       for (let x = 0; x <= rect.width; x += gridSize) {
@@ -108,57 +107,36 @@ export function SceneViewer({ hotspots, activeHotspot, onHotspotClick, highlight
         ctx.stroke()
       }
 
-      // Perspective lines for depth illusion
+      // Perspective lines
       const cx = rect.width / 2
-      const horizon = rect.height * 0.35
-      ctx.strokeStyle = "rgba(148, 163, 184, 0.03)"
+      const horizon = rect.height * 0.4
+      ctx.strokeStyle = "rgba(255, 255, 255, 0.03)"
+      for (let i = -10; i <= 10; i++) {
+        ctx.beginPath()
+        ctx.moveTo(cx + i * 200, rect.height)
+        ctx.lineTo(cx + i * 40, horizon)
+        ctx.stroke()
+      }
+
+      // Building wireframe
+      ctx.strokeStyle = "rgba(255, 255, 255, 0.08)"
       ctx.lineWidth = 1
-      for (let i = -6; i <= 6; i++) {
-        ctx.beginPath()
-        ctx.moveTo(cx + i * 120, rect.height)
-        ctx.lineTo(cx + i * 20, horizon)
-        ctx.stroke()
-      }
-      for (let i = 0; i <= 8; i++) {
-        const y = horizon + ((rect.height - horizon) * i) / 8
-        ctx.beginPath()
-        ctx.moveTo(0, y)
-        ctx.lineTo(rect.width, y)
-        ctx.stroke()
-      }
-
-      // Building wireframe shapes
-      ctx.strokeStyle = "rgba(249, 115, 22, 0.12)"
-      ctx.lineWidth = 1.5
-
-      // Main building outline
-      const bx = rect.width * 0.25
-      const by = rect.height * 0.3
-      const bw = rect.width * 0.5
-      const bh = rect.height * 0.5
+      const bx = rect.width * 0.3
+      const by = rect.height * 0.35
+      const bw = rect.width * 0.4
+      const bh = rect.height * 0.45
       ctx.strokeRect(bx, by, bw, bh)
 
       // Floors
-      for (let i = 1; i <= 3; i++) {
-        const floorY = by + (bh * i) / 4
+      ctx.setLineDash([5, 5])
+      for (let i = 1; i <= 4; i++) {
+        const floorY = by + (bh * i) / 5
         ctx.beginPath()
         ctx.moveTo(bx, floorY)
         ctx.lineTo(bx + bw, floorY)
         ctx.stroke()
       }
-
-      // Crane arm
-      ctx.strokeStyle = "rgba(249, 115, 22, 0.08)"
-      ctx.beginPath()
-      ctx.moveTo(bx + bw * 0.7, by)
-      ctx.lineTo(bx + bw * 0.7, by - rect.height * 0.15)
-      ctx.lineTo(bx + bw * 1.1, by - rect.height * 0.15)
-      ctx.stroke()
-
-      // Ground plane markers
-      ctx.fillStyle = "rgba(148, 163, 184, 0.04)"
-      ctx.fillRect(rect.width * 0.1, rect.height * 0.82, rect.width * 0.15, rect.height * 0.08)
-      ctx.fillRect(rect.width * 0.7, rect.height * 0.75, rect.width * 0.2, rect.height * 0.12)
+      ctx.setLineDash([])
     }
 
     draw()

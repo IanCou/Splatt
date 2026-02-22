@@ -443,18 +443,40 @@ def prepare_datadir(
     # ns-process-data wraps COLMAP's feature extraction + matching + triangulation
     # pipeline and outputs a nerfstudio-compatible transforms.json.
     print("\n─── Step 2/3: Running COLMAP (may take several minutes) ────────────────")
-    subprocess.run([
+    # Set QT_QPA_PLATFORM=offscreen to prevent COLMAP from trying to open a
+    # GUI on headless servers (crashes with "could not connect to display").
+    colmap_env = os.environ.copy()
+    colmap_env["QT_QPA_PLATFORM"] = "offscreen"
+
+    colmap_result = subprocess.run([
         "/opt/miniforge3/envs/nerf/bin/ns-process-data", "images",
         "--data",         str(extracted_path),
         "--output-dir",   str(output_path),
-        "--matcher-type", "any",      # "any" = COLMAP's exhaustive+vocab-tree fallback
+        "--matcher-type", "any",
         "--matching-method",  "sequential",
         "--sfm-tool",     "colmap",
-        "--no-verbose",
-        "--no-gpu",       # Run COLMAP feature matching on CPU for portability;
-                          # remove this flag if your server has multiple GPUs and you
-                          # want faster matching.
-    ], check=True)
+        "--no-gpu",       # COLMAP GPU SIFT requires OpenGL, which isn't available
+                          # on headless servers without a display/EGL setup.
+    ], capture_output=True, text=True, env=colmap_env)
+
+    if colmap_result.returncode != 0:
+        import sys
+        # Write to stderr so the error propagates through the SSH error channel
+        print(f"COLMAP_FAILED (exit {colmap_result.returncode})", file=sys.stderr)
+        if colmap_result.stdout:
+            print(f"COLMAP STDOUT:\n{colmap_result.stdout[-2000:]}", file=sys.stderr)
+        if colmap_result.stderr:
+            print(f"COLMAP STDERR:\n{colmap_result.stderr[-2000:]}", file=sys.stderr)
+        # Also print to stdout for streaming visibility
+        print(f"  ❌ COLMAP / ns-process-data failed (exit {colmap_result.returncode})")
+        print(f"  STDOUT: {colmap_result.stdout[-2000:] if colmap_result.stdout else '(empty)'}")
+        print(f"  STDERR: {colmap_result.stderr[-2000:] if colmap_result.stderr else '(empty)'}")
+        raise subprocess.CalledProcessError(
+            colmap_result.returncode,
+            colmap_result.args,
+            colmap_result.stdout,
+            colmap_result.stderr,
+        )
 
     # --- Inject temporal metadata ------------------------------------------------
     print("\n─── Step 3/3: Injecting Temporal Metadata into transforms.json ─────────")
@@ -651,11 +673,13 @@ def export_splat_to_ply(
             map_to_tensors["green"] = colors_u8[:, 1]
             map_to_tensors["blue"]  = colors_u8[:, 2]
         else:
-            # SH DC band: shs_0 shape is [N, 1, 3] in nerfstudio.
-            # The inria convention stores f_dc_0, f_dc_1, f_dc_2 as separate scalars.
-            shs_0 = model.shs_0.contiguous().cpu().numpy()   # [N, 1, 3]
+            # SH DC band: shs_0 shape may be [N, 1, 3] or [N, 3] depending on
+            # the nerfstudio version.  Handle both.
+            shs_0 = model.shs_0.contiguous().cpu().numpy()
+            if shs_0.ndim == 3:
+                shs_0 = shs_0[:, 0, :]  # [N, 1, 3] → [N, 3]
             for i in range(3):
-                map_to_tensors[f"f_dc_{i}"] = shs_0[:, 0, i].astype(np.float32)
+                map_to_tensors[f"f_dc_{i}"] = shs_0[:, i].astype(np.float32)
 
             # SH higher-order bands.
             if model.config.sh_degree > 0:

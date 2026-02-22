@@ -257,43 +257,74 @@ export function VideoLibrary() {
 
       setUploads((prev) => [newUpload, ...prev])
 
-      // Simulate upload progress
-      for (let p = 10; p <= 70; p += 15) {
-        await new Promise((r) => setTimeout(r, 300))
-        setUploads((prev) => prev.map((u) => (u.id === uploadId ? { ...u, progress: p } : u)))
-      }
-
-      setUploads((prev) =>
-        prev.map((u) => (u.id === uploadId ? { ...u, progress: 80, status: "processing" } : u))
-      )
+      // Track the current ID — it changes once backend assigns a task ID
+      let currentId = uploadId
 
       try {
+        // Build FormData and upload directly to the backend via Next.js proxy
         const formData = new FormData()
-        formData.append("video", file)
+        formData.append("file", file)
 
-        const res = await fetch("/api/videos/groups", { method: "POST", body: formData })
+        setUploads((prev) =>
+          prev.map((u) => (u.id === currentId ? { ...u, progress: 10, backendStatus: "Uploading to server..." } : u))
+        )
 
-        if (!res.ok) throw new Error("Upload failed")
+        const xhr = new XMLHttpRequest()
 
-        const result = await res.json()
+        const uploadPromise = new Promise<{ task_id: string }>((resolve, reject) => {
+          xhr.upload.addEventListener("progress", (e) => {
+            if (e.lengthComputable) {
+              // Map upload progress to 10-80% range
+              const pct = 10 + Math.round((e.loaded / e.total) * 70)
+              setUploads((prev) =>
+                prev.map((u) => (u.id === currentId ? { ...u, progress: pct } : u))
+              )
+            }
+          })
+
+          xhr.addEventListener("load", () => {
+            if (xhr.status >= 200 && xhr.status < 300) {
+              try {
+                resolve(JSON.parse(xhr.responseText))
+              } catch {
+                reject(new Error("Invalid response from server"))
+              }
+            } else {
+              reject(new Error(`Upload failed (${xhr.status})`))
+            }
+          })
+
+          xhr.addEventListener("error", () => reject(new Error("Network error during upload")))
+          xhr.addEventListener("abort", () => reject(new Error("Upload aborted")))
+
+          xhr.open("POST", "/api/videos/upload")
+          xhr.send(formData)
+        })
+
+        setUploads((prev) =>
+          prev.map((u) => (u.id === currentId ? { ...u, progress: 80, status: "processing", backendStatus: "Processing video..." } : u))
+        )
+
+        const result = await uploadPromise
 
         // Switch to backend task tracking
         const backendTaskId = result.task_id
         setUploads((prev) =>
-          prev.map((u) => (u.id === uploadId ? {
+          prev.map((u) => (u.id === currentId ? {
             ...u,
             id: `task-${backendTaskId}`,
             progress: 5,
             status: "processing",
-            backendStatus: "Request accepted..."
+            backendStatus: "Processing started..."
           } : u))
         )
+        currentId = `task-${backendTaskId}`
 
-        // The useEffect will take it from here
+        // The useEffect polling will take it from here
       } catch (err: any) {
         setUploads((prev) =>
           prev.map((u) =>
-            u.id === uploadId ? { ...u, progress: 0, status: "error", error: err.message || "Upload failed. Try again." } : u
+            u.id === currentId ? { ...u, progress: 0, status: "error", error: err.message || "Upload failed. Try again." } : u
           )
         )
       }

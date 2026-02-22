@@ -9,16 +9,27 @@ logger = logging.getLogger(__name__)
 
 
 
-def run_remote_pipeline(task_id: str, local_video_path: str, on_progress=None):
+def run_remote_pipeline(task_id: str, local_video_path: str = None, filebin_url: str = None, on_progress=None):
     """
     SSH Orchestration Background Task.
 
     1. Connect to the remote worker via SSH (with keepalives for long training).
-    2. Upload the video to the remote machine.
+    2. Either upload the video via SFTP (legacy) OR download from Filebin URL (faster).
     3. Run Nerf4Dgsplat.py (already present on the remote) and stream stdout
        to parse training-iteration progress.
     4. Download result PLY files + transforms.json.
     5. Clean up remote temp files.
+
+    Parameters
+    ----------
+    task_id : str
+        Unique task identifier
+    local_video_path : str, optional
+        Path to local video file (for SFTP upload)
+    filebin_url : str, optional
+        Filebin URL to download video from (faster alternative)
+    on_progress : callable, optional
+        Progress callback function
     """
 
     def report(status: str, progress: int):
@@ -62,18 +73,42 @@ def run_remote_pipeline(task_id: str, local_video_path: str, on_progress=None):
         sftp = ssh.open_sftp()
         logger.info("SSH connection established.")
 
-        # ── 2. Upload video ───────────────────────────────────────────
-        report("Uploading video to worker...", 15)
-        logger.info("Uploading %s → %s", local_video_path, remote_video_path)
+        # ── 2. Get video to worker (either upload or download from Filebin) ──
+        if filebin_url:
+            # Download from Filebin URL (much faster than SFTP)
+            report("Worker downloading video from Filebin...", 15)
+            logger.info("Remote downloading from %s → %s", filebin_url, remote_video_path)
 
-        file_size = os.path.getsize(local_video_path)
+            download_cmd = f"curl -s -o {remote_video_path} '{filebin_url}'"
+            logger.info("Executing remote download: %s", download_cmd)
 
-        def upload_callback(transferred, total):
-            pct = 15 + int((transferred / total) * 15)  # 15-30 %
-            report(f"Uploading video… {transferred * 100 // total}%", pct)
+            stdin, stdout, stderr = ssh.exec_command(download_cmd, timeout=600)
+            exit_status = stdout.channel.recv_exit_status()
 
-        sftp.put(local_video_path, remote_video_path, callback=upload_callback)
-        logger.info("Video upload complete.")
+            if exit_status != 0:
+                error_msg = stderr.read().decode().strip()
+                logger.error("Remote download failed: %s", error_msg)
+                report(f"Download failed: {error_msg[:100]}", -1)
+                return
+
+            logger.info("Remote download complete.")
+            report("Video downloaded on worker", 30)
+
+        elif local_video_path:
+            # Legacy: Upload via SFTP (slower)
+            report("Uploading video to worker...", 15)
+            logger.info("Uploading %s → %s", local_video_path, remote_video_path)
+
+            file_size = os.path.getsize(local_video_path)
+
+            def upload_callback(transferred, total):
+                pct = 15 + int((transferred / total) * 15)  # 15-30 %
+                report(f"Uploading video… {transferred * 100 // total}%", pct)
+
+            sftp.put(local_video_path, remote_video_path, callback=upload_callback)
+            logger.info("Video upload complete.")
+        else:
+            raise ValueError("Either local_video_path or filebin_url must be provided")
 
         # ── 3. Run Nerf4Dgsplat.py on the remote ─────────────────────
         #    The script is already deployed at project_dir.
@@ -150,8 +185,8 @@ def run_remote_pipeline(task_id: str, local_video_path: str, on_progress=None):
         if sftp:
             sftp.close()
         ssh.close()
-        # Cleanup local temp file
-        if os.path.exists(local_video_path):
+        # Cleanup local temp file (only if we uploaded via SFTP)
+        if local_video_path and os.path.exists(local_video_path):
             os.remove(local_video_path)
             logger.info("Cleaned up local temp file: %s", local_video_path)
 

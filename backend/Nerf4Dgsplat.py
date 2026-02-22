@@ -9,6 +9,8 @@
 # Requirements:
 #   pip install nerfstudio plyfile
 
+# for editing detail: SplatfactoModelConfig
+
 from __future__ import annotations
 
 import json
@@ -70,12 +72,14 @@ def run_gs_reconstruction(
                 cache_images_type="uint8",
             ),
             model=SplatfactoModelConfig(
-                stop_split_at=min(30000, iterations),
+                stop_split_at=min(25000, iterations),
                 cull_alpha_thresh=0.05,
                 densify_grad_thresh=0.0003,
                 camera_optimizer=CameraOptimizerConfig(mode="SO3xR3"),
                 sh_degree=2,
                 num_downscales=1,
+                max_gauss_ratio=230,
+                refine_every=100
             ),
         ),
         optimizers={

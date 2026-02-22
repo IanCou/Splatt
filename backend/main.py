@@ -145,30 +145,32 @@ def convert_ply_to_splat(ply_path: str) -> io.BytesIO:
     
     data = np.fromfile(ply_path, dtype=dt, count=num_vertices, offset=data_start)
     
-    # Pack into .splat format (32 bytes per vertex)
-    # pos[3] (f4), scale[3] (f4), rgba[4] (u1), rot[4] (u1)
+    # PLY scales are typically log-scales, opacities are logit-space.
+    # 1. Scales: log -> linear
+    scales = np.exp(data['scale']).astype(np.float32)
     
-    # 1. Normalize rotation to unit quaternions and map to 0-255
-    # Standard: (q + 1) / 2 * 255
+    # 2. Normalize rotation to unit quaternions and map to 0-255
     rot = data['rot']
     rot_norm = np.linalg.norm(rot, axis=1, keepdims=True)
     rot_unit = rot / (rot_norm + 1e-8)
+    # Map from [-1, 1] to [0, 255]
     rot_u8 = ((rot_unit + 1.0) * 0.5 * 255.0).clip(0, 255).astype(np.uint8)
     
-    # 2. Process color and opacity
-    # Opacity in PLY is often sigmoid'd if it's from some trainers, 
-    # but here we'll assume it's 0-1 unless we see values outside.
-    opacity = np.clip(data['opacity'], 0, 1) * 255
+    # 3. Opacity: logit -> sigmoid
+    # sigmoid(x) = 1 / (1 + exp(-x))
+    opacity_linear = 1.0 / (1.0 + np.exp(-data['opacity']))
+    opacity_u8 = (np.clip(opacity_linear, 0, 1) * 255).astype(np.uint8)
+    
     rgba_u8 = np.concatenate([
         data['color'], 
-        opacity.reshape(-1, 1).astype(np.uint8)
+        opacity_u8.reshape(-1, 1)
     ], axis=1)
     
     buffer = io.BytesIO()
     # Batch write everything for speed
     for i in range(num_vertices):
         buffer.write(data['pos'][i].tobytes())
-        buffer.write(data['scale'][i].tobytes())
+        buffer.write(scales[i].tobytes())
         buffer.write(rgba_u8[i].tobytes())
         buffer.write(rot_u8[i].tobytes())
         
@@ -256,6 +258,105 @@ async def load_splat(full_path: str):
         print(f"Exception in load_splat: {e}")
         import traceback
         traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+def get_gaussians_data(target_path: str, limit: int = 100):
+    """
+    Extracts raw Gaussian data from a .pt or .ply file for inspection.
+    """
+    ext = os.path.splitext(target_path)[1].lower()
+    
+    if ext == ".pt":
+        state_dict = torch.load(target_path, map_location=torch.device('cpu'), weights_only=True)
+        xyz = state_dict['xyz'].detach().cpu().numpy()
+        scales = state_dict['scales'].detach().cpu().numpy()
+        colors = state_dict['colors'].detach().cpu().numpy()
+        opacities = state_dict['opacities'].detach().cpu().numpy().flatten()
+        
+        # Take first 'limit' Gaussians
+        limit = min(limit, xyz.shape[0])
+        gaussians = []
+        for i in range(limit):
+            gaussians.append({
+                "id": i,
+                "pos": xyz[i].tolist(),
+                "scale": scales[i].tolist(),
+                "color": colors[i].tolist(),
+                "opacity": float(opacities[i]),
+                # PT files implementation usually defaults to identity rotation
+                "rot": [0, 0, 0, 1] 
+            })
+        return gaussians
+
+    elif ext == ".ply" or not ext:
+        with open(target_path, 'rb') as f:
+            header = ""
+            while "end_header" not in header:
+                header += f.readline().decode('ascii', errors='ignore')
+            data_start = f.tell()
+
+        num_vertices = 0
+        for line in header.split('\n'):
+            if line.startswith('element vertex'):
+                num_vertices = int(line.split()[-1])
+                break
+
+        dt = np.dtype([
+            ('pos', 'f4', 3),
+            ('normals', 'f4', 3),
+            ('color', 'u1', 3),
+            ('opacity', 'f4'),
+            ('scale', 'f4', 3),
+            ('rot', 'f4', 4)
+        ])
+        
+        # Read only the first 'limit' vertices for speed
+        read_limit = min(limit, num_vertices)
+        data = np.fromfile(target_path, dtype=dt, count=read_limit, offset=data_start)
+        
+        gaussians = []
+        for i in range(len(data)):
+            gaussians.append({
+                "id": i,
+                "pos": data['pos'][i].tolist(),
+                "scale": data['scale'][i].tolist(),
+                "color": data['color'][i].tolist(),
+                "opacity": float(data['opacity'][i]),
+                "rot": data['rot'][i].tolist()
+            })
+        return gaussians
+    
+    return []
+
+@app.get("/inspect-gaussians/{full_path:path}")
+async def inspect_gaussians(full_path: str, limit: int = 100):
+    """
+    Returns raw Gaussian data as JSON for inspection.
+    """
+    try:
+        clean_path = full_path.strip().strip("'").strip('"').rstrip(":")
+        clean_path = os.path.normpath(clean_path)
+        
+        target_path = clean_path
+        if not os.path.exists(target_path):
+            # Try some common variations like in load_splat
+            basename = os.path.basename(clean_path)
+            for ext in ["", ".ply", ".pt"]:
+                test_path = basename if not basename.lower().endswith(ext.lower()) else basename
+                if ext and not basename.lower().endswith(ext.lower()):
+                     test_path += ext
+                if os.path.exists(test_path):
+                    target_path = test_path
+                    break
+
+        if not os.path.exists(target_path):
+            raise HTTPException(status_code=404, detail=f"File not found: {target_path}")
+
+        data = get_gaussians_data(target_path, limit)
+        return JSONResponse(content={"gaussians": data, "total_sample": len(data), "file": target_path})
+
+    except Exception as e:
+        print(f"Inspection error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":

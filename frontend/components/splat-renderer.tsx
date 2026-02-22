@@ -2,47 +2,35 @@
 
 import React, { Suspense } from 'react';
 import { Canvas } from '@react-three/fiber';
-import { OrbitControls, Splat, PerspectiveCamera } from '@react-three/drei';
+import { Splat, OrbitControls, Stage } from '@react-three/drei';
+import { Loader2 } from 'lucide-react';
 
 interface SplatRendererProps {
     url: string;
 }
 
-const SplatScene = ({ url }: SplatRendererProps) => {
-    // Debug: Check the URL content type and size before Splat loads it
-    React.useEffect(() => {
-        fetch(url, { method: 'HEAD' })
-            .then(res => {
-                console.log(`[SplatLoader] Fetching: ${url}`);
-                console.log(`[SplatLoader] Status: ${res.status}`);
-                console.log(`[SplatLoader] Type: ${res.headers.get('content-type')}`);
-                console.log(`[SplatLoader] Size: ${res.headers.get('content-length')} bytes`);
-            })
-            .catch(err => console.error("[SplatLoader] HEAD request failed:", err));
-    }, [url]);
-
+function SplatScene({ url }: { url: string }) {
     return (
-        <>
-            <PerspectiveCamera makeDefault position={[0, 0, 5]} />
+        <Suspense fallback={null}>
+            <Stage intensity={0.5} environment="city" adjustCamera={1.5}>
+                <Splat src={url} />
+            </Stage>
             <OrbitControls makeDefault />
-            <Splat
-                src={url}
-                position={[0, 0, 0]}
-            />
-        </>
+        </Suspense>
     );
-};
+}
 
 export function SplatRenderer({ url }: SplatRendererProps) {
     return (
-        <div className="w-full h-full bg-slate-950 rounded-lg overflow-hidden relative border border-slate-800">
-            <Canvas shadows dpr={[1, 2]}>
-                <Suspense fallback={null}>
-                    <SplatScene url={url} />
-                </Suspense>
+        <div className="w-full h-full bg-slate-950 relative">
+            <Canvas dpr={[1, 2]} camera={{ position: [0, 0, 5], fov: 45 }}>
+                <color attach="background" args={['#020617']} />
+                <SplatScene url={url} />
             </Canvas>
-            <div className="absolute bottom-4 left-4 text-xs text-slate-400 bg-slate-900/80 px-2 py-1 rounded">
-                Double click to focus • Click and drag to rotate • Scroll to zoom
+            <div className="absolute top-4 left-4 z-10">
+                <div className="px-3 py-1 bg-slate-900/80 backdrop-blur border border-slate-700 rounded-full text-[10px] text-slate-400 font-medium">
+                    3D GAUSSIAN SPLAT
+                </div>
             </div>
         </div>
     );
